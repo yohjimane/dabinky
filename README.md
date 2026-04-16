@@ -1,4 +1,4 @@
-# OQ Video Editor
+# dabinky
 
 A custom browser-based video editor built on [Remotion](https://remotion.dev) and [Remotion Player](https://www.remotion.dev/player). Drop in video clips, arrange them on a multi-track timeline, add captions, and render to MP4.
 
@@ -10,8 +10,8 @@ A custom browser-based video editor built on [Remotion](https://remotion.dev) an
 ## Quick start
 
 ```bash
-git clone <repo-url>
-cd panel_autocalc_demo
+git clone git@github.com:yohjimane/dabinky.git
+cd dabinky
 npm install          # postinstall auto-creates src/data/composition.json from default
 npm run editor       # opens the custom timeline editor at http://localhost:5180
 ```

@@ -707,8 +707,12 @@ const EditorInner: React.FC<{ initial: MyCompositionProps }> = ({
                   selected.itemIndex === ci
                 }
                 onSelect={() => {
+                  const wasSelected =
+                    selected?.kind === "clip" &&
+                    selected.trackIndex === ti &&
+                    selected.itemIndex === ci;
                   setSelected({ kind: "clip", trackIndex: ti, itemIndex: ci });
-                  seekTo(clip.from);
+                  if (!wasSelected) seekTo(clip.from);
                 }}
                 onChange={(patch, coalesce) =>
                   updateClip(ti, ci, patch, coalesce)
@@ -761,12 +765,16 @@ const EditorInner: React.FC<{ initial: MyCompositionProps }> = ({
                   selected.itemIndex === si
                 }
                 onSelect={() => {
+                  const wasSelected =
+                    selected?.kind === "segment" &&
+                    selected.trackIndex === ti &&
+                    selected.itemIndex === si;
                   setSelected({
                     kind: "segment",
                     trackIndex: ti,
                     itemIndex: si,
                   });
-                  seekTo(seg.from);
+                  if (!wasSelected) seekTo(seg.from);
                 }}
                 onChange={(patch, coalesce) =>
                   updateSegment(ti, si, patch, coalesce)

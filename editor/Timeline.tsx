@@ -58,8 +58,11 @@ export const Timeline: React.FC<{
     trackIndex: number;
     itemIndex: number;
   };
-  const snap = useCallback(
-    (value: number, exclude: SnapExclude | null): number => {
+  // Given one or more candidate values (e.g., both edges of a clip being moved),
+  // find the closest snap target within threshold and return the delta that
+  // shifts all candidates by the same amount to land on it. Sets the snap line.
+  const snapMany = useCallback(
+    (candidates: number[], exclude: SnapExclude | null): number => {
       const threshold = 8 / pxPerSec;
       const targets: number[] = [0];
       // Only include playhead as a snap target when snapping clip/segment edits,
@@ -89,19 +92,30 @@ export const Timeline: React.FC<{
           targets.push(s.from + s.duration);
         }),
       );
-      let best: number | null = null;
+      let bestTarget: number | null = null;
+      let bestCandidate: number | null = null;
       let bestDist = threshold;
-      for (const t of targets) {
-        const d = Math.abs(value - t);
-        if (d <= bestDist) {
-          bestDist = d;
-          best = t;
+      for (const c of candidates) {
+        for (const t of targets) {
+          const d = Math.abs(c - t);
+          if (d <= bestDist) {
+            bestDist = d;
+            bestTarget = t;
+            bestCandidate = c;
+          }
         }
       }
-      setSnapLine(best);
-      return best ?? value;
+      setSnapLine(bestTarget);
+      return bestTarget !== null && bestCandidate !== null
+        ? bestTarget - bestCandidate
+        : 0;
     },
     [state, currentSeconds, pxPerSec],
+  );
+  const snap = useCallback(
+    (value: number, exclude: SnapExclude | null): number =>
+      value + snapMany([value], exclude),
+    [snapMany],
   );
   const clearSnap = useCallback(() => setSnapLine(null), []);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -310,7 +324,7 @@ export const Timeline: React.FC<{
                           })
                         }
                         onSeek={onSeek}
-                        snap={snap}
+                        snapMany={snapMany}
                         clearSnap={clearSnap}
                       />
                     ))}
@@ -385,7 +399,7 @@ export const Timeline: React.FC<{
                         })
                       }
                       onSeek={onSeek}
-                      snap={snap}
+                      snapMany={snapMany}
                       clearSnap={clearSnap}
                     />
                   ))}
@@ -646,8 +660,8 @@ const ClipBlock: React.FC<{
   selected: boolean;
   onSelect: () => void;
   onSeek: (s: number) => void;
-  snap: (
-    value: number,
+  snapMany: (
+    candidates: number[],
     exclude: { kind: "clip" | "segment"; trackIndex: number; itemIndex: number },
   ) => number;
   clearSnap: () => void;
@@ -660,7 +674,7 @@ const ClipBlock: React.FC<{
   selected,
   onSelect,
   onSeek,
-  snap,
+  snapMany,
   clearSnap,
 }) => {
   const duration = clip.endAt - clip.startFrom;
@@ -676,6 +690,7 @@ const ClipBlock: React.FC<{
 
   const beginDrag = (e: React.PointerEvent, mode: DragMode) => {
     const origin = { ...clip };
+    const originDuration = origin.endAt - origin.startFrom;
     startDrag(
       e,
       mode,
@@ -683,13 +698,14 @@ const ClipBlock: React.FC<{
       (dSec) => {
         let effective = dSec;
         if (mode === "left") {
-          const snappedFrom = snap(origin.from + dSec, exclude);
-          effective = snappedFrom - origin.from;
+          effective = dSec + snapMany([origin.from + dSec], exclude);
         } else if (mode === "right") {
-          const originRight =
-            origin.from + (origin.endAt - origin.startFrom);
-          const snappedRight = snap(originRight + dSec, exclude);
-          effective = snappedRight - originRight;
+          const originRight = origin.from + originDuration;
+          effective = dSec + snapMany([originRight + dSec], exclude);
+        } else {
+          const newLeft = origin.from + dSec;
+          const newRight = newLeft + originDuration;
+          effective = dSec + snapMany([newLeft, newRight], exclude);
         }
         update((prev) => {
           const tracks = prev.videoTracks.slice();
@@ -738,8 +754,8 @@ const ClipBlock: React.FC<{
       label={clip.src}
       sublabel={`${fmt(clip.startFrom)} – ${fmt(clip.endAt)}`}
       onSelect={() => {
+        if (!selected) onSeek(clip.from);
         onSelect();
-        onSeek(clip.from);
       }}
       onMoveDown={(e) => beginDrag(e, "move")}
       onLeftDown={(e) => beginDrag(e, "left")}
@@ -760,8 +776,8 @@ const SegmentBlock: React.FC<{
   selected: boolean;
   onSelect: () => void;
   onSeek: (s: number) => void;
-  snap: (
-    value: number,
+  snapMany: (
+    candidates: number[],
     exclude: { kind: "clip" | "segment"; trackIndex: number; itemIndex: number },
   ) => number;
   clearSnap: () => void;
@@ -774,7 +790,7 @@ const SegmentBlock: React.FC<{
   selected,
   onSelect,
   onSeek,
-  snap,
+  snapMany,
   clearSnap,
 }) => {
   const left = segment.from * pxPerSec;
@@ -796,12 +812,14 @@ const SegmentBlock: React.FC<{
       (dSec) => {
         let effective = dSec;
         if (mode === "left") {
-          const snappedFrom = snap(origin.from + dSec, exclude);
-          effective = snappedFrom - origin.from;
+          effective = dSec + snapMany([origin.from + dSec], exclude);
         } else if (mode === "right") {
           const originRight = origin.from + origin.duration;
-          const snappedRight = snap(originRight + dSec, exclude);
-          effective = snappedRight - originRight;
+          effective = dSec + snapMany([originRight + dSec], exclude);
+        } else {
+          const newLeft = origin.from + dSec;
+          const newRight = newLeft + origin.duration;
+          effective = dSec + snapMany([newLeft, newRight], exclude);
         }
         update((prev) => {
           const tracks = prev.textTracks.slice();
@@ -852,8 +870,8 @@ const SegmentBlock: React.FC<{
       label={segment.text || "(empty)"}
       sublabel={`${fmt(segment.from)} · ${fmt(segment.duration)}s`}
       onSelect={() => {
+        if (!selected) onSeek(segment.from);
         onSelect();
-        onSeek(segment.from);
       }}
       onMoveDown={(e) => beginDrag(e, "move")}
       onLeftDown={(e) => beginDrag(e, "left")}

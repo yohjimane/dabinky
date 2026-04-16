@@ -153,32 +153,50 @@ export const MyComposition: React.FC<MyCompositionProps> = ({
       {videoTracks.flatMap((track, ti) =>
         track.clips
           .filter((clip) => clip.endAt > clip.startFrom)
-          .map((clip, ci) => (
-            <Sequence
-              key={`${track.id}-${ci}`}
-              from={Math.round(clip.from * fps)}
-              durationInFrames={Math.round(
-                (clip.endAt - clip.startFrom) * fps,
-              )}
-              layout="none"
-            >
-              <Video
-                src={staticFile(clip.src)}
-                trimBefore={Math.round(clip.startFrom * fps)}
-                trimAfter={Math.round(clip.endAt * fps)}
-                muted
-              />
-            </Sequence>
-          )),
+          .map((clip, ci) => {
+            // Round both timeline boundaries independently and derive duration
+            // from their difference — otherwise a clip snapped exactly to the
+            // end of the previous one can be off by a frame, showing black.
+            const fromFrame = Math.round(clip.from * fps);
+            const endFrame = Math.round(
+              (clip.from + clip.endAt - clip.startFrom) * fps,
+            );
+            const trimBefore = Math.round(clip.startFrom * fps);
+            const trimAfter = trimBefore + (endFrame - fromFrame);
+            // Premount so the <Video> element mounts and seeks before this
+            // clip is actually visible — prevents a 1-frame black flash at the
+            // boundary between two adjacent clips.
+            const premountFor = Math.round(0.5 * fps);
+            return (
+              <Sequence
+                key={`${track.id}-${ci}`}
+                from={fromFrame}
+                durationInFrames={Math.max(1, endFrame - fromFrame)}
+                premountFor={premountFor}
+              >
+                <Video
+                  src={staticFile(clip.src)}
+                  trimBefore={trimBefore}
+                  trimAfter={trimAfter}
+                  muted
+                />
+              </Sequence>
+            );
+          }),
       )}
       {textTracks.flatMap((track, ti) =>
         track.segments
           .filter((segment) => segment.duration > 0)
-          .map((segment, si) => (
+          .map((segment, si) => {
+            const fromFrame = Math.round(segment.from * fps);
+            const endFrame = Math.round(
+              (segment.from + segment.duration) * fps,
+            );
+            return (
             <Sequence
               key={`${track.id}-${si}`}
-              from={Math.round(segment.from * fps)}
-              durationInFrames={Math.round(segment.duration * fps)}
+              from={fromFrame}
+              durationInFrames={Math.max(1, endFrame - fromFrame)}
               layout="none"
             >
               <TextOverlay
@@ -191,7 +209,8 @@ export const MyComposition: React.FC<MyCompositionProps> = ({
                 paddingBottom={paddingBottom}
               />
             </Sequence>
-          )),
+            );
+          }),
       )}
     </AbsoluteFill>
   );

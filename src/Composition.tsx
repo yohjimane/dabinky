@@ -15,12 +15,16 @@ const ClipSchema = z.object({
   from: z.number().describe("Timeline position in seconds"),
   startFrom: z.number().describe("Source start (seconds into the clip)"),
   endAt: z.number().describe("Source end (seconds into the clip)"),
+  fadeIn: z.number().describe("Fade in duration in seconds").optional(),
+  fadeOut: z.number().describe("Fade out duration in seconds").optional(),
 });
 
 const TextSegmentSchema = z.object({
   from: z.number().describe("Start time in seconds"),
   duration: z.number().describe("Duration in seconds"),
   text: z.string().describe("Text to display"),
+  fadeIn: z.number().describe("Fade in duration in seconds").optional(),
+  fadeOut: z.number().describe("Fade out duration in seconds").optional(),
 });
 
 const VideoTrackSchema = z.object({
@@ -65,9 +69,48 @@ export const MyCompositionSchema = z.object({
 
 export type MyCompositionProps = z.infer<typeof MyCompositionSchema>;
 
+const useFadeOpacity = (fadeInSec: number, fadeOutSec: number): number => {
+  const frame = useCurrentFrame();
+  const { fps, durationInFrames } = useVideoConfig();
+  const inFrames = Math.max(0, fadeInSec) * fps;
+  const outFrames = Math.max(0, fadeOutSec) * fps;
+  const fadeIn =
+    inFrames > 0
+      ? interpolate(frame, [0, inFrames], [0, 1], {
+          extrapolateLeft: "clamp",
+          extrapolateRight: "clamp",
+          easing: Easing.inOut(Easing.quad),
+        })
+      : 1;
+  const fadeOut =
+    outFrames > 0
+      ? interpolate(
+          frame,
+          [durationInFrames - outFrames, durationInFrames],
+          [1, 0],
+          {
+            extrapolateLeft: "clamp",
+            extrapolateRight: "clamp",
+            easing: Easing.inOut(Easing.quad),
+          },
+        )
+      : 1;
+  return Math.min(fadeIn, fadeOut);
+};
+
+const FadeWrapper: React.FC<{
+  fadeInSec: number;
+  fadeOutSec: number;
+  children: React.ReactNode;
+}> = ({ fadeInSec, fadeOutSec, children }) => {
+  const opacity = useFadeOpacity(fadeInSec, fadeOutSec);
+  return <AbsoluteFill style={{ opacity }}>{children}</AbsoluteFill>;
+};
+
 const TextOverlay: React.FC<{
   text: string;
-  fadeDuration: number;
+  fadeInSec: number;
+  fadeOutSec: number;
   fontSize: number;
   textColor: string;
   bgColor: string;
@@ -75,36 +118,15 @@ const TextOverlay: React.FC<{
   paddingBottom: number;
 }> = ({
   text,
-  fadeDuration,
+  fadeInSec,
+  fadeOutSec,
   fontSize,
   textColor,
   bgColor,
   bgBorderRadius,
   paddingBottom,
 }) => {
-  const frame = useCurrentFrame();
-  const { fps, durationInFrames } = useVideoConfig();
-
-  const fadeDurationFrames = fadeDuration * fps;
-
-  const fadeIn = interpolate(frame, [0, fadeDurationFrames], [0, 1], {
-    extrapolateLeft: "clamp",
-    extrapolateRight: "clamp",
-    easing: Easing.inOut(Easing.quad),
-  });
-
-  const fadeOut = interpolate(
-    frame,
-    [durationInFrames - fadeDurationFrames, durationInFrames],
-    [1, 0],
-    {
-      extrapolateLeft: "clamp",
-      extrapolateRight: "clamp",
-      easing: Easing.inOut(Easing.quad),
-    },
-  );
-
-  const opacity = Math.min(fadeIn, fadeOut);
+  const opacity = useFadeOpacity(fadeInSec, fadeOutSec);
 
   return (
     <AbsoluteFill
@@ -174,12 +196,17 @@ export const MyComposition: React.FC<MyCompositionProps> = ({
                 durationInFrames={Math.max(1, endFrame - fromFrame)}
                 premountFor={premountFor}
               >
-                <Video
-                  src={staticFile(clip.src)}
-                  trimBefore={trimBefore}
-                  trimAfter={trimAfter}
-                  muted
-                />
+                <FadeWrapper
+                  fadeInSec={clip.fadeIn ?? 0}
+                  fadeOutSec={clip.fadeOut ?? 0}
+                >
+                  <Video
+                    src={staticFile(clip.src)}
+                    trimBefore={trimBefore}
+                    trimAfter={trimAfter}
+                    muted
+                  />
+                </FadeWrapper>
               </Sequence>
             );
           }),
@@ -201,7 +228,8 @@ export const MyComposition: React.FC<MyCompositionProps> = ({
             >
               <TextOverlay
                 text={segment.text}
-                fadeDuration={fadeDuration}
+                fadeInSec={segment.fadeIn ?? fadeDuration}
+                fadeOutSec={segment.fadeOut ?? fadeDuration}
                 fontSize={fontSize}
                 textColor={textColor}
                 bgColor={bgColor}

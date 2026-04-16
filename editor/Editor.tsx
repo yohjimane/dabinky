@@ -1223,6 +1223,40 @@ const ClipCard: React.FC<{
     </div>
     <div
       onClick={(e) => e.stopPropagation()}
+      style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}
+    >
+      <div>
+        <div style={labelStyle}>Fade in (s)</div>
+        <input
+          type="number"
+          step="0.1"
+          min="0"
+          style={inputStyle}
+          value={clip.fadeIn ?? 0}
+          onChange={(e) =>
+            onChange({ fadeIn: Math.max(0, Number(e.target.value)) }, "fadeIn")
+          }
+        />
+      </div>
+      <div>
+        <div style={labelStyle}>Fade out (s)</div>
+        <input
+          type="number"
+          step="0.1"
+          min="0"
+          style={inputStyle}
+          value={clip.fadeOut ?? 0}
+          onChange={(e) =>
+            onChange(
+              { fadeOut: Math.max(0, Number(e.target.value)) },
+              "fadeOut",
+            )
+          }
+        />
+      </div>
+    </div>
+    <div
+      onClick={(e) => e.stopPropagation()}
       style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}
     >
       <button style={splitBtnStyle} onClick={onSplit}>
@@ -1277,6 +1311,47 @@ const SegmentCard: React.FC<{
           onChange={(e) =>
             onChange({ duration: Number(e.target.value) }, "duration")
           }
+        />
+      </div>
+    </div>
+    <div
+      onClick={(e) => e.stopPropagation()}
+      style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}
+    >
+      <div>
+        <div style={labelStyle}>Fade in (s)</div>
+        <input
+          type="number"
+          step="0.1"
+          min="0"
+          style={inputStyle}
+          value={segment.fadeIn ?? ""}
+          placeholder="default"
+          onChange={(e) => {
+            const v = e.target.value;
+            onChange(
+              { fadeIn: v === "" ? undefined : Math.max(0, Number(v)) },
+              "fadeIn",
+            );
+          }}
+        />
+      </div>
+      <div>
+        <div style={labelStyle}>Fade out (s)</div>
+        <input
+          type="number"
+          step="0.1"
+          min="0"
+          style={inputStyle}
+          value={segment.fadeOut ?? ""}
+          placeholder="default"
+          onChange={(e) => {
+            const v = e.target.value;
+            onChange(
+              { fadeOut: v === "" ? undefined : Math.max(0, Number(v)) },
+              "fadeOut",
+            );
+          }}
         />
       </div>
     </div>

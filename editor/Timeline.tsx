@@ -6,7 +6,7 @@ import type {
 } from "@src/Composition";
 import { ASSET_MIME, AssetDragPayload } from "./MediaPool";
 
-type DragMode = "move" | "left" | "right";
+type DragMode = "move" | "left" | "right" | "fadeLeft" | "fadeRight";
 
 const TRACK_HEIGHT = 44;
 const TRACK_GAP = 4;
@@ -691,6 +691,8 @@ const ClipBlock: React.FC<{
   const beginDrag = (e: React.PointerEvent, mode: DragMode) => {
     const origin = { ...clip };
     const originDuration = origin.endAt - origin.startFrom;
+    const originFadeIn = origin.fadeIn ?? 0;
+    const originFadeOut = origin.fadeOut ?? 0;
     startDrag(
       e,
       mode,
@@ -702,7 +704,7 @@ const ClipBlock: React.FC<{
         } else if (mode === "right") {
           const originRight = origin.from + originDuration;
           effective = dSec + snapMany([originRight + dSec], exclude);
-        } else {
+        } else if (mode === "move") {
           const newLeft = origin.from + dSec;
           const newRight = newLeft + originDuration;
           effective = dSec + snapMany([newLeft, newRight], exclude);
@@ -730,12 +732,24 @@ const ClipBlock: React.FC<{
               startFrom: newStartFrom,
               from: Math.max(0, origin.from + delta),
             };
-          } else {
+          } else if (mode === "right") {
             const newEndAt = Math.max(
               origin.startFrom + MIN_DURATION,
               origin.endAt + effective,
             );
             clips[itemIndex] = { ...cur, endAt: newEndAt };
+          } else if (mode === "fadeLeft") {
+            const maxFade = Math.max(0, originDuration - originFadeOut);
+            const newFadeIn = Math.max(0, Math.min(maxFade, originFadeIn + dSec));
+            clips[itemIndex] = { ...cur, fadeIn: newFadeIn };
+          } else if (mode === "fadeRight") {
+            const maxFade = Math.max(0, originDuration - originFadeIn);
+            // Drag left = negative dSec = longer fade-out
+            const newFadeOut = Math.max(
+              0,
+              Math.min(maxFade, originFadeOut - dSec),
+            );
+            clips[itemIndex] = { ...cur, fadeOut: newFadeOut };
           }
           tracks[trackIndex] = { ...track, clips };
           return { ...prev, videoTracks: tracks };
@@ -753,6 +767,8 @@ const ClipBlock: React.FC<{
       selected={selected}
       label={clip.src}
       sublabel={`${fmt(clip.startFrom)} – ${fmt(clip.endAt)}`}
+      fadeInPx={Math.max(0, (clip.fadeIn ?? 0) * pxPerSec)}
+      fadeOutPx={Math.max(0, (clip.fadeOut ?? 0) * pxPerSec)}
       onSelect={() => {
         if (!selected) onSeek(clip.from);
         onSelect();
@@ -760,6 +776,8 @@ const ClipBlock: React.FC<{
       onMoveDown={(e) => beginDrag(e, "move")}
       onLeftDown={(e) => beginDrag(e, "left")}
       onRightDown={(e) => beginDrag(e, "right")}
+      onFadeLeftDown={(e) => beginDrag(e, "fadeLeft")}
+      onFadeRightDown={(e) => beginDrag(e, "fadeRight")}
     />
   );
 };
@@ -805,6 +823,8 @@ const SegmentBlock: React.FC<{
 
   const beginDrag = (e: React.PointerEvent, mode: DragMode) => {
     const origin = { ...segment };
+    const originFadeIn = origin.fadeIn ?? 0;
+    const originFadeOut = origin.fadeOut ?? 0;
     startDrag(
       e,
       mode,
@@ -816,7 +836,7 @@ const SegmentBlock: React.FC<{
         } else if (mode === "right") {
           const originRight = origin.from + origin.duration;
           effective = dSec + snapMany([originRight + dSec], exclude);
-        } else {
+        } else if (mode === "move") {
           const newLeft = origin.from + dSec;
           const newRight = newLeft + origin.duration;
           effective = dSec + snapMany([newLeft, newRight], exclude);
@@ -847,11 +867,22 @@ const SegmentBlock: React.FC<{
               from: newFrom,
               duration: Math.max(MIN_DURATION, origin.duration - delta),
             };
-          } else {
+          } else if (mode === "right") {
             segs[itemIndex] = {
               ...cur,
               duration: Math.max(MIN_DURATION, origin.duration + effective),
             };
+          } else if (mode === "fadeLeft") {
+            const maxFade = Math.max(0, origin.duration - originFadeOut);
+            const newFadeIn = Math.max(0, Math.min(maxFade, originFadeIn + dSec));
+            segs[itemIndex] = { ...cur, fadeIn: newFadeIn };
+          } else if (mode === "fadeRight") {
+            const maxFade = Math.max(0, origin.duration - originFadeIn);
+            const newFadeOut = Math.max(
+              0,
+              Math.min(maxFade, originFadeOut - dSec),
+            );
+            segs[itemIndex] = { ...cur, fadeOut: newFadeOut };
           }
           tracks[trackIndex] = { ...track, segments: segs };
           return { ...prev, textTracks: tracks };
@@ -869,6 +900,8 @@ const SegmentBlock: React.FC<{
       selected={selected}
       label={segment.text || "(empty)"}
       sublabel={`${fmt(segment.from)} · ${fmt(segment.duration)}s`}
+      fadeInPx={Math.max(0, (segment.fadeIn ?? 0) * pxPerSec)}
+      fadeOutPx={Math.max(0, (segment.fadeOut ?? 0) * pxPerSec)}
       onSelect={() => {
         if (!selected) onSeek(segment.from);
         onSelect();
@@ -876,6 +909,8 @@ const SegmentBlock: React.FC<{
       onMoveDown={(e) => beginDrag(e, "move")}
       onLeftDown={(e) => beginDrag(e, "left")}
       onRightDown={(e) => beginDrag(e, "right")}
+      onFadeLeftDown={(e) => beginDrag(e, "fadeLeft")}
+      onFadeRightDown={(e) => beginDrag(e, "fadeRight")}
     />
   );
 };
@@ -887,10 +922,14 @@ const Block: React.FC<{
   selected: boolean;
   label: string;
   sublabel: string;
+  fadeInPx?: number;
+  fadeOutPx?: number;
   onSelect: () => void;
   onMoveDown: (e: React.PointerEvent) => void;
   onLeftDown: (e: React.PointerEvent) => void;
   onRightDown: (e: React.PointerEvent) => void;
+  onFadeLeftDown?: (e: React.PointerEvent) => void;
+  onFadeRightDown?: (e: React.PointerEvent) => void;
 }> = ({
   left,
   width,
@@ -898,11 +937,20 @@ const Block: React.FC<{
   selected,
   label,
   sublabel,
+  fadeInPx = 0,
+  fadeOutPx = 0,
   onSelect,
   onMoveDown,
   onLeftDown,
   onRightDown,
-}) => (
+  onFadeLeftDown,
+  onFadeRightDown,
+}) => {
+  const height = TRACK_HEIGHT - 6;
+  // Visual endpoint of each fade ramp, clamped inside the block.
+  const inX = Math.min(width, Math.max(0, fadeInPx));
+  const outX = Math.max(0, width - Math.max(0, fadeOutPx));
+  return (
   <div
     onPointerDown={(e) => {
       onSelect();
@@ -913,7 +961,7 @@ const Block: React.FC<{
       top: 3,
       left,
       width,
-      height: TRACK_HEIGHT - 6,
+      height,
       background: color,
       border: `1px solid ${selected ? "#ffffff" : "rgba(255,255,255,0.15)"}`,
       borderRadius: 5,
@@ -922,6 +970,51 @@ const Block: React.FC<{
       boxShadow: selected ? "0 0 0 2px rgba(255,255,255,0.3)" : undefined,
     }}
   >
+    {(fadeInPx > 0 || fadeOutPx > 0) && (
+      <svg
+        width={width}
+        height={height}
+        style={{
+          position: "absolute",
+          top: 0,
+          left: 0,
+          pointerEvents: "none",
+        }}
+      >
+        {fadeInPx > 0 && (
+          <>
+            <polygon
+              points={`0,0 ${inX},0 0,${height}`}
+              fill="rgba(0,0,0,0.45)"
+            />
+            <line
+              x1="0"
+              y1={height}
+              x2={inX}
+              y2="0"
+              stroke="rgba(255,255,255,0.85)"
+              strokeWidth="1"
+            />
+          </>
+        )}
+        {fadeOutPx > 0 && (
+          <>
+            <polygon
+              points={`${outX},0 ${width},0 ${width},${height}`}
+              fill="rgba(0,0,0,0.45)"
+            />
+            <line
+              x1={outX}
+              y1="0"
+              x2={width}
+              y2={height}
+              stroke="rgba(255,255,255,0.85)"
+              strokeWidth="1"
+            />
+          </>
+        )}
+      </svg>
+    )}
     <div
       onPointerDown={(e) => {
         e.stopPropagation();
@@ -954,6 +1047,52 @@ const Block: React.FC<{
         cursor: "ew-resize",
       }}
     />
+    {onFadeLeftDown && (
+      <div
+        onPointerDown={(e) => {
+          e.stopPropagation();
+          onSelect();
+          onFadeLeftDown(e);
+        }}
+        title="Drag inward to set fade in"
+        style={{
+          position: "absolute",
+          left: Math.max(0, inX - 5),
+          top: 0,
+          width: 10,
+          height: 10,
+          background: "#ffffff",
+          border: "1px solid rgba(0,0,0,0.55)",
+          borderRadius: 10,
+          cursor: "ew-resize",
+          zIndex: 3,
+          boxShadow: "0 0 3px rgba(0,0,0,0.4)",
+        }}
+      />
+    )}
+    {onFadeRightDown && (
+      <div
+        onPointerDown={(e) => {
+          e.stopPropagation();
+          onSelect();
+          onFadeRightDown(e);
+        }}
+        title="Drag inward to set fade out"
+        style={{
+          position: "absolute",
+          left: Math.min(width - 10, Math.max(0, outX - 5)),
+          top: 0,
+          width: 10,
+          height: 10,
+          background: "#ffffff",
+          border: "1px solid rgba(0,0,0,0.55)",
+          borderRadius: 10,
+          cursor: "ew-resize",
+          zIndex: 3,
+          boxShadow: "0 0 3px rgba(0,0,0,0.4)",
+        }}
+      />
+    )}
     <div
       style={{
         padding: `2px ${HANDLE_WIDTH + 4}px`,
@@ -978,7 +1117,8 @@ const Block: React.FC<{
       <div style={{ opacity: 0.75, fontSize: 10 }}>{sublabel}</div>
     </div>
   </div>
-);
+  );
+};
 
 const fmt = (s: number) => {
   const v = Math.round(s * 10) / 10;

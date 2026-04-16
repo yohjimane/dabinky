@@ -2,6 +2,7 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import fs from "node:fs";
 import path from "node:path";
+import { spawn } from "node:child_process";
 
 const repoRoot = path.resolve(__dirname);
 const jsonPath = path.join(repoRoot, "src/data/composition.json");
@@ -11,6 +12,7 @@ const defaultJsonPath = path.join(
 );
 const publicDir = path.join(repoRoot, "public");
 const mediaDir = path.join(publicDir, "media");
+const outDir = path.join(repoRoot, "out");
 const VIDEO_EXT = new Set([".mp4", ".mov", ".webm", ".mkv", ".m4v"]);
 
 const MIME_BY_EXT: Record<string, string> = {
@@ -311,6 +313,98 @@ export default defineConfig({
               }),
             );
           }
+        });
+        // Save a client-side render: accepts the MP4 body streamed from the
+        // browser (produced by @remotion/web-renderer) and writes it to out/.
+        server.middlewares.use("/api/save-render", (req, res) => {
+          if (req.method !== "POST") {
+            res.statusCode = 405;
+            res.end("method not allowed");
+            return;
+          }
+          const rawName = req.headers["x-filename"];
+          if (typeof rawName !== "string" || !rawName) {
+            res.statusCode = 400;
+            res.end(
+              JSON.stringify({ ok: false, error: "missing x-filename" }),
+            );
+            return;
+          }
+          let filename: string;
+          try {
+            filename = decodeURIComponent(rawName);
+          } catch {
+            res.statusCode = 400;
+            res.end(
+              JSON.stringify({ ok: false, error: "invalid x-filename" }),
+            );
+            return;
+          }
+          const safeName =
+            filename
+              .replace(/[^A-Za-z0-9._ -]/g, "_")
+              .replace(/\.mp4$/i, "") + ".mp4";
+          const outputPath = path.join(outDir, safeName);
+          if (!outputPath.startsWith(outDir + path.sep)) {
+            res.statusCode = 400;
+            res.end(
+              JSON.stringify({ ok: false, error: "invalid output path" }),
+            );
+            return;
+          }
+          if (!fs.existsSync(outDir))
+            fs.mkdirSync(outDir, { recursive: true });
+          const out = fs.createWriteStream(outputPath);
+          req.pipe(out);
+          out.on("finish", () => {
+            res.setHeader("content-type", "application/json");
+            res.end(
+              JSON.stringify({ ok: true, path: `out/${safeName}` }),
+            );
+          });
+          out.on("error", (err) => {
+            res.statusCode = 500;
+            res.end(JSON.stringify({ ok: false, error: err.message }));
+          });
+        });
+        server.middlewares.use("/api/reveal", (req, res) => {
+          if (req.method !== "POST") {
+            res.statusCode = 405;
+            res.end("method not allowed");
+            return;
+          }
+          let body = "";
+          req.on("data", (c) => {
+            body += c;
+          });
+          req.on("end", () => {
+            try {
+              const { path: relPath } = JSON.parse(body) as { path?: string };
+              if (!relPath) throw new Error("missing path");
+              const abs = path.resolve(repoRoot, relPath);
+              if (!abs.startsWith(outDir + path.sep))
+                throw new Error("only files under out/ can be revealed");
+              if (!fs.existsSync(abs)) throw new Error("file not found");
+              // macOS: -R reveals the file in Finder. On Linux/Windows this is
+              // a no-op — we just open the directory.
+              const args =
+                process.platform === "darwin"
+                  ? ["-R", abs]
+                  : [path.dirname(abs)];
+              const cmd = process.platform === "win32" ? "explorer" : "open";
+              spawn(cmd, args, { detached: true, stdio: "ignore" }).unref();
+              res.setHeader("content-type", "application/json");
+              res.end(JSON.stringify({ ok: true }));
+            } catch (err) {
+              res.statusCode = 400;
+              res.end(
+                JSON.stringify({
+                  ok: false,
+                  error: (err as Error).message,
+                }),
+              );
+            }
+          });
         });
       },
     },

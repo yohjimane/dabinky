@@ -616,6 +616,15 @@ const EditorInner: React.FC<{ initial: MyCompositionProps }> = ({
             Revert
           </IconButton>
           <SaveButton dirty={dirty} saving={saving} onClick={save} />
+          <RenderButton
+            dirty={dirty}
+            onSaveFirst={save}
+            inputProps={state}
+            durationInFrames={durationInFrames}
+            fps={FPS}
+            width={WIDTH}
+            height={HEIGHT}
+          />
           <span
             style={{
               color: saveMsg.startsWith("Error") ? "#ff7a75" : "#8b8b94",
@@ -835,6 +844,353 @@ const SaveButton: React.FC<{
     >
       {label}
     </button>
+  );
+};
+
+type RenderState =
+  | { kind: "idle" }
+  | { kind: "preparing" }
+  | {
+      kind: "rendering";
+      progress: number;
+      renderedFrames: number;
+      encodedFrames: number;
+      totalFrames: number;
+    }
+  | { kind: "saving" }
+  | { kind: "done"; outputPath: string }
+  | { kind: "error"; message: string };
+
+const defaultRenderName = () => {
+  const d = new Date();
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `render-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+};
+
+const RenderButton: React.FC<{
+  dirty: boolean;
+  onSaveFirst: () => Promise<void> | void;
+  inputProps: MyCompositionProps;
+  durationInFrames: number;
+  fps: number;
+  width: number;
+  height: number;
+}> = ({
+  dirty,
+  onSaveFirst,
+  inputProps,
+  durationInFrames,
+  fps,
+  width,
+  height,
+}) => {
+  const [open, setOpen] = React.useState(false);
+  const [filename, setFilename] = React.useState(defaultRenderName());
+  const [state, setState] = React.useState<RenderState>({ kind: "idle" });
+  const cancelRef = React.useRef<AbortController | null>(null);
+  const rootRef = React.useRef<HTMLDivElement>(null);
+
+  const running =
+    state.kind === "preparing" ||
+    state.kind === "rendering" ||
+    state.kind === "saving";
+
+  React.useEffect(() => {
+    if (!open) return;
+    const onDoc = (e: MouseEvent) => {
+      if (running) return;
+      if (!rootRef.current?.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, [open, running]);
+
+  const startRender = async () => {
+    if (dirty) await onSaveFirst();
+    setState({ kind: "preparing" });
+    const controller = new AbortController();
+    cancelRef.current = controller;
+    try {
+      const { renderMediaOnWeb } = await import("@remotion/web-renderer");
+      const result = await renderMediaOnWeb({
+        composition: {
+          id: "MyComp",
+          component: MyComposition,
+          durationInFrames,
+          fps,
+          width,
+          height,
+        },
+        inputProps,
+        container: "mp4",
+        videoCodec: "h264",
+        // No audio yet — suppresses any audio decoding path.
+        muted: true,
+        // Prefer GPU-backed WebCodecs encoder (VideoToolbox on macOS, etc.).
+        hardwareAcceleration: "prefer-hardware",
+        // Always get a Blob back — we POST it to the server to save, so the
+        // output always lands in out/ regardless of File System Access support.
+        outputTarget: "arraybuffer",
+        signal: controller.signal,
+        onProgress: (p) => {
+          setState({
+            kind: "rendering",
+            progress: p.progress,
+            renderedFrames: p.renderedFrames,
+            encodedFrames: p.encodedFrames,
+            totalFrames: durationInFrames,
+          });
+        },
+      });
+      const blob = await result.getBlob();
+      setState({ kind: "saving" });
+      const safeName = filename || defaultRenderName();
+      const res = await fetch("/api/save-render", {
+        method: "POST",
+        headers: {
+          "content-type": "video/mp4",
+          "x-filename": encodeURIComponent(`${safeName}.mp4`),
+        },
+        body: blob,
+      });
+      const json = await res.json();
+      if (!json.ok) throw new Error(json.error ?? "save failed");
+      setState({ kind: "done", outputPath: json.path });
+    } catch (err) {
+      setState({ kind: "error", message: (err as Error).message });
+    } finally {
+      cancelRef.current = null;
+    }
+  };
+
+  const cancelRender = () => {
+    cancelRef.current?.abort();
+  };
+
+  const reveal = async (p: string) => {
+    try {
+      await fetch("/api/reveal", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ path: p }),
+      });
+    } catch {
+      // ignore
+    }
+  };
+
+  return (
+    <div ref={rootRef} style={{ position: "relative" }}>
+      <button
+        onClick={() => {
+          setOpen((o) => !o);
+          if (state.kind === "done" || state.kind === "error") {
+            setState({ kind: "idle" });
+            setFilename(defaultRenderName());
+          }
+        }}
+        style={{
+          background: running ? "#7a2a2a" : "#a13a2a",
+          color: "white",
+          border: "none",
+          padding: "8px 14px",
+          borderRadius: 8,
+          cursor: "pointer",
+          fontWeight: 600,
+          boxShadow: "0 0 0 1px rgba(255,255,255,0.15)",
+        }}
+        title="Render to MP4"
+      >
+        {running ? "Rendering…" : "Render"}
+      </button>
+      {open && (
+        <div
+          style={{
+            position: "absolute",
+            top: "calc(100% + 6px)",
+            right: 0,
+            width: 340,
+            background: "#17171d",
+            border: "1px solid #2e2e34",
+            borderRadius: 8,
+            padding: 14,
+            boxShadow: "0 8px 24px rgba(0,0,0,0.5)",
+            zIndex: 10,
+            fontSize: 12,
+            color: "#e8e8ea",
+          }}
+        >
+          <div style={{ fontWeight: 700, marginBottom: 8 }}>Render video</div>
+          {state.kind === "idle" && (
+            <>
+              <div style={{ ...labelStyle, marginBottom: 4 }}>Filename</div>
+              <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                <input
+                  style={inputStyle}
+                  value={filename}
+                  onChange={(e) => setFilename(e.target.value)}
+                  placeholder="render-…"
+                  autoFocus
+                />
+                <span style={{ color: "#70707a", fontSize: 11 }}>.mp4</span>
+              </div>
+              <div
+                style={{
+                  marginTop: 4,
+                  color: "#70707a",
+                  fontSize: 11,
+                }}
+              >
+                Output: out/{filename || "…"}.mp4
+              </div>
+              <div style={{ display: "flex", gap: 6, marginTop: 12 }}>
+                <button style={splitBtnStyle} onClick={() => setOpen(false)}>
+                  Cancel
+                </button>
+                <div style={{ flex: 1 }} />
+                <button
+                  style={{
+                    ...addBtnStyle,
+                    background: "#a13a2a",
+                    padding: "6px 14px",
+                  }}
+                  onClick={startRender}
+                >
+                  Start render
+                </button>
+              </div>
+            </>
+          )}
+          {(state.kind === "preparing" ||
+            state.kind === "rendering" ||
+            state.kind === "saving") && (
+            <RenderProgress state={state} onCancel={cancelRender} />
+          )}
+          {state.kind === "done" && (
+            <div>
+              <div style={{ color: "#8fd48b", marginBottom: 8 }}>
+                ✓ Saved to {state.outputPath}
+              </div>
+              <div style={{ display: "flex", gap: 6 }}>
+                <button
+                  style={splitBtnStyle}
+                  onClick={() => {
+                    setState({ kind: "idle" });
+                    setFilename(defaultRenderName());
+                  }}
+                >
+                  Render another
+                </button>
+                <div style={{ flex: 1 }} />
+                <button
+                  style={{ ...addBtnStyle, padding: "6px 14px" }}
+                  onClick={() => reveal(state.outputPath)}
+                >
+                  Reveal in Finder
+                </button>
+              </div>
+            </div>
+          )}
+          {state.kind === "error" && (
+            <div>
+              <div
+                style={{
+                  color: "#ff7a75",
+                  marginBottom: 8,
+                  whiteSpace: "pre-wrap",
+                  maxHeight: 140,
+                  overflow: "auto",
+                  fontFamily: "ui-monospace, monospace",
+                  fontSize: 11,
+                }}
+              >
+                {state.message}
+              </div>
+              <div style={{ display: "flex", justifyContent: "flex-end" }}>
+                <button
+                  style={splitBtnStyle}
+                  onClick={() => setState({ kind: "idle" })}
+                >
+                  Dismiss
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+};
+
+const RenderProgress: React.FC<{
+  state: Extract<
+    RenderState,
+    { kind: "preparing" } | { kind: "rendering" } | { kind: "saving" }
+  >;
+  onCancel: () => void;
+}> = ({ state, onCancel }) => {
+  const bar = (pct: number, color: string) => (
+    <div
+      style={{
+        height: 8,
+        background: "#0b0b0e",
+        borderRadius: 4,
+        overflow: "hidden",
+        border: "1px solid #2e2e38",
+      }}
+    >
+      <div
+        style={{
+          width: `${Math.max(0, Math.min(1, pct)) * 100}%`,
+          height: "100%",
+          background: color,
+          transition: "width 120ms linear",
+        }}
+      />
+    </div>
+  );
+  const cancelRow = (
+    <div
+      style={{
+        display: "flex",
+        justifyContent: "flex-end",
+        marginTop: 10,
+      }}
+    >
+      <button style={splitBtnStyle} onClick={onCancel}>
+        Cancel
+      </button>
+    </div>
+  );
+  if (state.kind === "preparing") {
+    return (
+      <div>
+        <div style={{ marginBottom: 6 }}>Preparing render…</div>
+        {bar(0, "#4a6aa8")}
+        {cancelRow}
+      </div>
+    );
+  }
+  if (state.kind === "saving") {
+    return (
+      <div>
+        <div style={{ marginBottom: 6 }}>Saving to disk…</div>
+        {bar(1, "#4a6aa8")}
+      </div>
+    );
+  }
+  const p = state.progress;
+  const frames = state.renderedFrames;
+  const total = state.totalFrames;
+  return (
+    <div>
+      <div style={{ marginBottom: 6 }}>
+        Rendering {frames}
+        {total > 0 ? ` / ${total}` : ""} frames ({Math.round(p * 100)}%)
+      </div>
+      {bar(p, "#a13a2a")}
+      {cancelRow}
+    </div>
   );
 };
 

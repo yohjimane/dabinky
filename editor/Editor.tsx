@@ -340,14 +340,16 @@ const EditorInner: React.FC<{ initial: MyCompositionProps }> = ({
     const track = state.videoTracks[trackIdx];
     if (!track) return;
     const last = track.clips[track.clips.length - 1];
-    const defaultClip: Clip = last
-      ? {
-          src: last.src,
-          from: last.from + (last.endAt - last.startFrom),
-          startFrom: 0,
-          endAt: 5,
-        }
-      : { src: "wall_alignment_demo.mp4", from: 0, startFrom: 0, endAt: 5 };
+    if (!last) {
+      flash("Drop a clip from the media pool to add one to this track.");
+      return;
+    }
+    const defaultClip: Clip = {
+      src: last.src,
+      from: last.from + (last.endAt - last.startFrom),
+      startFrom: 0,
+      endAt: 5,
+    };
     set((prev) => ({
       ...prev,
       videoTracks: prev.videoTracks.map((t, i) =>

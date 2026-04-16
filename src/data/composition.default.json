@@ -1,0 +1,22 @@
+{
+  "fadeDuration": 0.5,
+  "fontSize": 32,
+  "textColor": "#ffffff",
+  "bgColor": "rgba(0, 0, 0, 0.7)",
+  "bgBorderRadius": 12,
+  "paddingBottom": 50,
+  "videoTracks": [
+    {
+      "id": "v1",
+      "name": "V1",
+      "clips": []
+    }
+  ],
+  "textTracks": [
+    {
+      "id": "t1",
+      "name": "Captions",
+      "segments": []
+    }
+  ]
+}

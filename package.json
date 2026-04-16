@@ -28,9 +28,11 @@
     "vite": "5.4.10"
   },
   "scripts": {
-    "dev": "remotion studio",
-    "editor": "vite",
-    "build": "remotion bundle",
+    "init-composition": "node scripts/init-composition.mjs",
+    "postinstall": "node scripts/init-composition.mjs",
+    "dev": "node scripts/init-composition.mjs && remotion studio",
+    "editor": "node scripts/init-composition.mjs && vite",
+    "build": "node scripts/init-composition.mjs && remotion bundle",
     "upgrade": "remotion upgrade",
     "lint": "eslint src && tsc"
   },

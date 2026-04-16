@@ -5,3 +5,7 @@ dist
 
 # Ignore the output video from Git but not videos you import into src/.
 out
+
+# Local working composition — generated from composition.default.json on install/dev.
+# Each user's local edits live here; the shared template is composition.default.json.
+src/data/composition.json

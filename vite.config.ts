@@ -5,6 +5,10 @@ import path from "node:path";
 
 const repoRoot = path.resolve(__dirname);
 const jsonPath = path.join(repoRoot, "src/data/composition.json");
+const defaultJsonPath = path.join(
+  repoRoot,
+  "src/data/composition.default.json",
+);
 const publicDir = path.join(repoRoot, "public");
 const VIDEO_EXT = new Set([".mp4", ".mov", ".webm", ".mkv", ".m4v"]);
 
@@ -29,6 +33,9 @@ export default defineConfig({
       configureServer(server) {
         server.middlewares.use("/api/composition", (req, res) => {
           if (req.method === "GET") {
+            if (!fs.existsSync(jsonPath) && fs.existsSync(defaultJsonPath)) {
+              fs.copyFileSync(defaultJsonPath, jsonPath);
+            }
             const raw = fs.readFileSync(jsonPath, "utf8");
             res.setHeader("content-type", "application/json");
             res.end(raw);

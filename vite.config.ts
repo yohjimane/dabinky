@@ -13,6 +13,14 @@ const publicDir = path.join(repoRoot, "public");
 const mediaDir = path.join(publicDir, "media");
 const VIDEO_EXT = new Set([".mp4", ".mov", ".webm", ".mkv", ".m4v"]);
 
+const MIME_BY_EXT: Record<string, string> = {
+  ".mp4": "video/mp4",
+  ".m4v": "video/mp4",
+  ".mov": "video/quicktime",
+  ".webm": "video/webm",
+  ".mkv": "video/x-matroska",
+};
+
 const ensureMediaDir = () => {
   if (!fs.existsSync(mediaDir)) {
     fs.mkdirSync(mediaDir, { recursive: true });
@@ -47,6 +55,68 @@ export default defineConfig({
     {
       name: "composition-json-api",
       configureServer(server) {
+        // Serve /media/* directly from disk. Vite's built-in public middleware
+        // caches the public dir file list and updates it async via a file
+        // watcher, so immediately after /api/rename there's a window where
+        // the new URL isn't in Vite's set and the SPA fallback returns
+        // index.html — poisoning <video> elements with an unplayable response.
+        server.middlewares.use("/media", (req, res, next) => {
+          if (req.method !== "GET" && req.method !== "HEAD") return next();
+          const rawUrl = (req.url ?? "/").split("?")[0].split("#")[0];
+          let rel: string;
+          try {
+            rel = decodeURI(rawUrl).replace(/^\/+/, "");
+          } catch {
+            return next();
+          }
+          const abs = path.join(mediaDir, rel);
+          if (!abs.startsWith(mediaDir + path.sep)) {
+            res.statusCode = 403;
+            return res.end("forbidden");
+          }
+          let stat: fs.Stats;
+          try {
+            stat = fs.statSync(abs);
+          } catch {
+            return next();
+          }
+          if (!stat.isFile()) return next();
+          const ext = path.extname(abs).toLowerCase();
+          res.setHeader(
+            "content-type",
+            MIME_BY_EXT[ext] ?? "application/octet-stream",
+          );
+          res.setHeader("accept-ranges", "bytes");
+          res.setHeader("cache-control", "no-cache");
+          const range = req.headers.range;
+          if (range) {
+            const m = /^bytes=(\d*)-(\d*)$/.exec(range);
+            if (m) {
+              const start = m[1] ? parseInt(m[1], 10) : 0;
+              const end = m[2] ? parseInt(m[2], 10) : stat.size - 1;
+              if (
+                Number.isNaN(start) ||
+                Number.isNaN(end) ||
+                start > end ||
+                end >= stat.size
+              ) {
+                res.statusCode = 416;
+                res.setHeader("content-range", `bytes */${stat.size}`);
+                return res.end();
+              }
+              res.statusCode = 206;
+              res.setHeader("content-range", `bytes ${start}-${end}/${stat.size}`);
+              res.setHeader("content-length", String(end - start + 1));
+              if (req.method === "HEAD") return res.end();
+              fs.createReadStream(abs, { start, end }).pipe(res);
+              return;
+            }
+          }
+          res.statusCode = 200;
+          res.setHeader("content-length", String(stat.size));
+          if (req.method === "HEAD") return res.end();
+          fs.createReadStream(abs).pipe(res);
+        });
         server.middlewares.use("/api/composition", (req, res) => {
           if (req.method === "GET") {
             if (!fs.existsSync(jsonPath) && fs.existsSync(defaultJsonPath)) {

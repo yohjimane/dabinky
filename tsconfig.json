@@ -7,9 +7,10 @@
     "noEmit": true,
     "lib": ["es2015"],
     "esModuleInterop": true,
+    "resolveJsonModule": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
     "noUnusedLocals": true
   },
-  "exclude": ["remotion.config.ts"]
+  "exclude": ["remotion.config.ts", "editor", "vite.config.ts"]
 }

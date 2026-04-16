@@ -1,0 +1,93 @@
+{
+  "fadeDuration": 0.5,
+  "fontSize": 32,
+  "textColor": "#ffffff",
+  "bgColor": "rgba(0, 0, 0, 0.7)",
+  "bgBorderRadius": 12,
+  "paddingBottom": 50,
+  "videoTracks": [
+    {
+      "id": "vwpxie",
+      "name": "V2",
+      "clips": [
+        {
+          "src": "Screen Recording 2026-04-16 at 12.10.11_PM.mov",
+          "from": 0,
+          "startFrom": 0,
+          "endAt": 60.735
+        }
+      ]
+    },
+    {
+      "id": "vx5mzb",
+      "name": "V2",
+      "clips": [
+        {
+          "src": "Screen Recording 2026-04-16 at 11.58.03_AM.mov",
+          "from": 60.90478515624999,
+          "startFrom": 4.022298177083333,
+          "endAt": 115.891667
+        }
+      ]
+    }
+  ],
+  "textTracks": [
+    {
+      "id": "t1",
+      "name": "Captions",
+      "segments": [
+        {
+          "from": 0,
+          "duration": 4.5,
+          "text": "Wall & Opening Alignment"
+        },
+        {
+          "from": 5,
+          "duration": 5,
+          "text": "Start by drawing an opening in Layout Sketch"
+        },
+        {
+          "from": 14.761555989583334,
+          "duration": 8.677571614583332,
+          "text": "Once wall is placed, you can update its alignment: Left, Center, or Right.\nYou can change this at any time by selecting the wall in Layout Sketch"
+        },
+        {
+          "from": 28.651529947916668,
+          "duration": 5,
+          "text": "Alignment updates both 2D and 3D visualizations"
+        },
+        {
+          "from": 34.268880208333336,
+          "duration": 6.231119791666664,
+          "text": "Select opening to adjust its alignment; all elements have their own independent alignment values"
+        },
+        {
+          "from": 46.5,
+          "duration": 5,
+          "text": "Set the opening alignment to match where it sits against the wall"
+        },
+        {
+          "from": 51.800944010416664,
+          "duration": 5,
+          "text": "The 2D layout sketch now shows polygon outlines for each element"
+        },
+        {
+          "from": 56.5146484375,
+          "duration": 3.401041666666667,
+          "text": "Pan and zoom the sketch to review the full enclosure layout"
+        }
+      ]
+    },
+    {
+      "id": "tx6a8t",
+      "name": "T2",
+      "segments": [
+        {
+          "from": 60.914583333333326,
+          "duration": 8.753743489583334,
+          "text": "Added column structure type to Layout Sketch"
+        }
+      ]
+    }
+  ]
+}

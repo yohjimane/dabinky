@@ -10,7 +10,23 @@ const defaultJsonPath = path.join(
   "src/data/composition.default.json",
 );
 const publicDir = path.join(repoRoot, "public");
+const mediaDir = path.join(publicDir, "media");
 const VIDEO_EXT = new Set([".mp4", ".mov", ".webm", ".mkv", ".m4v"]);
+
+const ensureMediaDir = () => {
+  if (!fs.existsSync(mediaDir)) {
+    fs.mkdirSync(mediaDir, { recursive: true });
+  }
+};
+
+// Resolve a clip's src (like "media/foo.mp4" or legacy "foo.mp4") to its
+// absolute filesystem path, staying inside publicDir.
+const resolveAssetPath = (relName: string): string | null => {
+  const normalized = relName.replace(/^\/+/, "");
+  const abs = path.join(publicDir, normalized);
+  if (!abs.startsWith(publicDir + path.sep) && abs !== publicDir) return null;
+  return abs;
+};
 
 export default defineConfig({
   root: path.join(repoRoot, "editor"),
@@ -106,8 +122,9 @@ export default defineConfig({
             );
             return;
           }
-          const dest = path.join(publicDir, base);
-          if (!dest.startsWith(publicDir + path.sep)) {
+          ensureMediaDir();
+          const dest = path.join(mediaDir, base);
+          if (!dest.startsWith(mediaDir + path.sep)) {
             res.statusCode = 400;
             res.end(
               JSON.stringify({ ok: false, error: "invalid destination" }),
@@ -118,7 +135,7 @@ export default defineConfig({
           req.pipe(out);
           out.on("finish", () => {
             res.setHeader("content-type", "application/json");
-            res.end(JSON.stringify({ ok: true, name: base }));
+            res.end(JSON.stringify({ ok: true, name: `media/${base}` }));
           });
           out.on("error", (err) => {
             res.statusCode = 500;
@@ -142,12 +159,16 @@ export default defineConfig({
                 to?: string;
               };
               if (!from || !to) throw new Error("missing from/to");
-              const fromBase = path.basename(from);
+              const fromAbs = resolveAssetPath(from);
+              if (!fromAbs) throw new Error("invalid source path");
+              if (!fs.existsSync(fromAbs))
+                throw new Error(`source not found: ${from}`);
+              const fromDir = path.dirname(fromAbs);
+              const fromExt = path.extname(fromAbs).toLowerCase();
               const toBase = path
                 .basename(to)
                 .replace(/[^A-Za-z0-9._ -]/g, "_");
               if (!toBase) throw new Error("invalid target name");
-              const fromExt = path.extname(fromBase).toLowerCase();
               const toExt = path.extname(toBase).toLowerCase();
               if (!VIDEO_EXT.has(fromExt))
                 throw new Error(`source not a video: ${fromExt}`);
@@ -155,21 +176,17 @@ export default defineConfig({
                 throw new Error(
                   `target must keep a video extension: ${toExt || "(none)"}`,
                 );
-              const fromPath = path.join(publicDir, fromBase);
-              const toPath = path.join(publicDir, toBase);
-              if (!fromPath.startsWith(publicDir + path.sep))
-                throw new Error("invalid source path");
-              if (!toPath.startsWith(publicDir + path.sep))
+              const toAbs = path.join(fromDir, toBase);
+              if (!toAbs.startsWith(publicDir + path.sep))
                 throw new Error("invalid target path");
-              if (!fs.existsSync(fromPath))
-                throw new Error(`source not found: ${fromBase}`);
-              if (fromPath !== toPath && fs.existsSync(toPath))
+              if (fromAbs !== toAbs && fs.existsSync(toAbs))
                 throw new Error(`target already exists: ${toBase}`);
-              if (fromPath !== toPath) fs.renameSync(fromPath, toPath);
+              if (fromAbs !== toAbs) fs.renameSync(fromAbs, toAbs);
+              // Return path using the same directory as from (relative to public/)
+              const relFromDir = path.relative(publicDir, fromDir);
+              const toRel = relFromDir ? `${relFromDir}/${toBase}` : toBase;
               res.setHeader("content-type", "application/json");
-              res.end(
-                JSON.stringify({ ok: true, from: fromBase, to: toBase }),
-              );
+              res.end(JSON.stringify({ ok: true, from, to: toRel }));
             } catch (err) {
               res.statusCode = 400;
               res.end(
@@ -188,19 +205,31 @@ export default defineConfig({
             return;
           }
           try {
-            const entries = fs.readdirSync(publicDir, { withFileTypes: true });
-            const assets = entries
-              .filter((e) => e.isFile())
-              .filter((e) => VIDEO_EXT.has(path.extname(e.name).toLowerCase()))
-              .map((e) => {
-                const stat = fs.statSync(path.join(publicDir, e.name));
-                return {
-                  name: e.name,
-                  size: stat.size,
-                  mtime: stat.mtimeMs,
-                };
-              })
-              .sort((a, b) => b.mtime - a.mtime);
+            ensureMediaDir();
+            const listDir = (
+              absDir: string,
+              relPrefix: string,
+            ): { name: string; size: number; mtime: number }[] => {
+              if (!fs.existsSync(absDir)) return [];
+              return fs
+                .readdirSync(absDir, { withFileTypes: true })
+                .filter((e) => e.isFile())
+                .filter((e) =>
+                  VIDEO_EXT.has(path.extname(e.name).toLowerCase()),
+                )
+                .map((e) => {
+                  const stat = fs.statSync(path.join(absDir, e.name));
+                  return {
+                    name: relPrefix ? `${relPrefix}/${e.name}` : e.name,
+                    size: stat.size,
+                    mtime: stat.mtimeMs,
+                  };
+                });
+            };
+            const assets = [
+              ...listDir(mediaDir, "media"),
+              ...listDir(publicDir, ""),
+            ].sort((a, b) => b.mtime - a.mtime);
             res.setHeader("content-type", "application/json");
             res.end(JSON.stringify({ assets }));
           } catch (err) {

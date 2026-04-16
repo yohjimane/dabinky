@@ -364,8 +364,9 @@ const AssetCard: React.FC<{
             whiteSpace: "nowrap",
             flex: 1,
           }}
+          title={asset.name}
         >
-          {asset.name}
+          {asset.name.split("/").pop()}
         </div>
         <div
           style={{

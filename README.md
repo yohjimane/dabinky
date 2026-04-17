@@ -5,7 +5,8 @@ A custom browser-based video editor built on [Remotion](https://remotion.dev) an
 ## Prerequisites
 
 - **Node.js 18+** and **npm** (anything newer is fine)
-- **ffmpeg** (optional; only needed to render videos locally — `brew install ffmpeg` on macOS)
+
+ffmpeg is bundled via `ffmpeg-static`, so no separate install is needed for in-editor rendering or the packaged desktop app.
 
 ## Quick start
 
@@ -39,6 +40,7 @@ The editor and Studio share the same project state (`src/data/composition.json`)
 - **Tracks** — add or reorder video/text tracks from the right sidebar. Higher tracks render on top (z-order).
 - **Save** — click **Save** in the top bar or press **⌘S** (yellow button indicates unsaved changes).
 - **Undo/redo** — **⌘Z / ⌘⇧Z**.
+- **Export / import** — click **⇣ Export** in the top bar to download the current project as a single `.dabinky` file (composition + every referenced video bundled into one ZIP). **⇡ Import** loads a `.dabinky` back. Use this to share a project with someone who doesn't have the source videos — everything they need is inside the bundle. Re-imports of the same media dedupe by SHA-256, so round-tripping the same file doesn't duplicate on disk.
 
 ## Rendering
 
@@ -60,12 +62,46 @@ Remotion reads from `src/data/composition.json` (whatever you've saved in the ed
 
 ## Sharing projects between machines
 
-The working file `src/data/composition.json` is gitignored so each person has their own. To share a specific project, copy the JSON file directly (or commit it under a different name).
+Use **⇣ Export** in the editor's top bar to produce a single `.dabinky` file — a ZIP containing the composition JSON plus every video clip it references. Send it to anyone; they click **⇡ Import** and the project loads with its media intact.
+
+If you'd rather share only the composition (no video data), copy `src/data/composition.json` — it's gitignored so each person has their own, and you can commit it under a different name for versioned scenes.
+
+## Desktop app (Electron)
+
+The editor can also run as a standalone macOS app.
+
+**Dev mode** — spawns an Electron window pointing at the dev server on port 5180:
+
+```bash
+npm run electron-dev
+```
+
+If `npm run editor` is already running on 5180, Electron reuses it. Otherwise Electron spawns its own Vite child.
+
+**Build a `.dmg`** — produces an installable macOS bundle (Apple Silicon only for now):
+
+```bash
+npm run install-pw-browsers   # one-time, ~800 MB into ./pw-browsers/
+npm run dist                  # outputs dist/Dabinky.dmg (~1 GB)
+```
+
+The `.dmg` bundles Electron, Vite, Playwright's Chromium + WebKit (for parallel rendering), and ffmpeg — users don't need any external installs. Project data (compositions, imported media, renders) lives in `~/Library/Application Support/Dabinky/`.
+
+Local builds are **unsigned**, so first launch needs:
+
+```bash
+xattr -cr /Applications/Dabinky.app
+codesign --force --deep --sign - /Applications/Dabinky.app
+```
+
+Signed + notarized builds are produced by `.github/workflows/build-dmg.yml` on tag push (`git tag v0.x.y && git push --tags`) and attached to a GitHub Release.
 
 ## Built on
 
 - [Remotion](https://remotion.dev) — React-based video compositing.
 - [Remotion Player](https://www.remotion.dev/player) — in-browser preview.
 - [Vite](https://vitejs.dev) — editor dev server.
+- [Playwright](https://playwright.dev) + [ffmpeg](https://ffmpeg.org) — parallel rendering pipeline.
+- [Electron](https://www.electronjs.org) + [electron-builder](https://www.electron.build) — desktop packaging.
 
 Remotion may require a company license for some uses — see the [Remotion license](https://github.com/remotion-dev/remotion/blob/main/LICENSE.md).

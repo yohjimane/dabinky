@@ -54,22 +54,135 @@ export const Timeline: React.FC<{
   const [pxPerSec, setPxPerSec] = useState(24);
   const [dragOverTrack, setDragOverTrack] = useState<number | null>(null);
   const [snapLine, setSnapLine] = useState<number | null>(null);
+  const [crossTrackDrag, setCrossTrackDrag] = useState<{
+    kind: "clip" | "segment";
+    sourceTrackIndex: number;
+    sourceItemIndex: number;
+    targetTrackIndex: number;
+  } | null>(null);
+
+  const computeCrossTrackTarget = useCallback(
+    (kind: "clip" | "segment", sourceTrackIndex: number, yDelta: number) => {
+      const count =
+        kind === "clip" ? state.videoTracks.length : state.textTracks.length;
+      if (count === 0) return sourceTrackIndex;
+      const rowHeight = TRACK_HEIGHT + TRACK_GAP;
+      const currentUiPos = count - 1 - sourceTrackIndex;
+      const rowsMoved = Math.round(yDelta / rowHeight);
+      const newUiPos = Math.max(
+        0,
+        Math.min(count - 1, currentUiPos + rowsMoved),
+      );
+      return count - 1 - newUiPos;
+    },
+    [state.videoTracks.length, state.textTracks.length],
+  );
+
+  const handleCrossTrackHover = useCallback(
+    (
+      kind: "clip" | "segment",
+      sourceTrackIndex: number,
+      sourceItemIndex: number,
+      yDelta: number,
+    ) => {
+      const targetTrackIndex = computeCrossTrackTarget(
+        kind,
+        sourceTrackIndex,
+        yDelta,
+      );
+      setCrossTrackDrag((cur) => {
+        if (
+          cur &&
+          cur.kind === kind &&
+          cur.sourceTrackIndex === sourceTrackIndex &&
+          cur.sourceItemIndex === sourceItemIndex &&
+          cur.targetTrackIndex === targetTrackIndex
+        ) {
+          return cur;
+        }
+        return { kind, sourceTrackIndex, sourceItemIndex, targetTrackIndex };
+      });
+    },
+    [computeCrossTrackTarget],
+  );
+
+  const handleCrossTrackEnd = useCallback(
+    (
+      kind: "clip" | "segment",
+      sourceTrackIndex: number,
+      sourceItemIndex: number,
+      yDelta: number,
+      coalesceKey: string,
+    ) => {
+      setCrossTrackDrag(null);
+      const targetTrackIndex = computeCrossTrackTarget(
+        kind,
+        sourceTrackIndex,
+        yDelta,
+      );
+      if (targetTrackIndex === sourceTrackIndex) return;
+      update((prev) => {
+        if (kind === "clip") {
+          const tracks = prev.videoTracks.slice();
+          const src = tracks[sourceTrackIndex];
+          const dst = tracks[targetTrackIndex];
+          if (!src || !dst) return prev;
+          const item = src.clips[sourceItemIndex];
+          if (!item) return prev;
+          const srcClips = src.clips.slice();
+          srcClips.splice(sourceItemIndex, 1);
+          const dstClips = [...dst.clips, item];
+          tracks[sourceTrackIndex] = { ...src, clips: srcClips };
+          tracks[targetTrackIndex] = { ...dst, clips: dstClips };
+          return { ...prev, videoTracks: tracks };
+        }
+        const tracks = prev.textTracks.slice();
+        const src = tracks[sourceTrackIndex];
+        const dst = tracks[targetTrackIndex];
+        if (!src || !dst) return prev;
+        const item = src.segments[sourceItemIndex];
+        if (!item) return prev;
+        const srcSegs = src.segments.slice();
+        srcSegs.splice(sourceItemIndex, 1);
+        const dstSegs = [...dst.segments, item];
+        tracks[sourceTrackIndex] = { ...src, segments: srcSegs };
+        tracks[targetTrackIndex] = { ...dst, segments: dstSegs };
+        return { ...prev, textTracks: tracks };
+      }, coalesceKey);
+      const newItemIndex =
+        kind === "clip"
+          ? state.videoTracks[targetTrackIndex]?.clips.length ?? 0
+          : state.textTracks[targetTrackIndex]?.segments.length ?? 0;
+      onSelect({ kind, trackIndex: targetTrackIndex, itemIndex: newItemIndex });
+    },
+    [computeCrossTrackTarget, update, onSelect, state.videoTracks, state.textTracks],
+  );
 
   type SnapExclude = {
     kind: "clip" | "segment";
     trackIndex: number;
     itemIndex: number;
   };
+  type SnapOptions = {
+    widePlayhead?: boolean;
+  };
   // Given one or more candidate values (e.g., both edges of a clip being moved),
   // find the closest snap target within threshold and return the delta that
   // shifts all candidates by the same amount to land on it. Sets the snap line.
   const snapMany = useCallback(
-    (candidates: number[], exclude: SnapExclude | null): number => {
-      const threshold = 8 / pxPerSec;
-      const targets: number[] = [0];
+    (
+      candidates: number[],
+      exclude: SnapExclude | null,
+      options?: SnapOptions,
+    ): number => {
+      const defaultThreshold = 8 / pxPerSec;
+      const playheadThreshold = options?.widePlayhead
+        ? 24 / pxPerSec
+        : defaultThreshold;
+      const targets: Array<[number, number]> = [[0, defaultThreshold]];
       // Only include playhead as a snap target when snapping clip/segment edits,
       // not when the playhead itself is being dragged.
-      if (exclude !== null) targets.push(currentSeconds);
+      if (exclude !== null) targets.push([currentSeconds, playheadThreshold]);
       state.videoTracks.forEach((t, ti) =>
         t.clips.forEach((c, ci) => {
           if (
@@ -78,8 +191,8 @@ export const Timeline: React.FC<{
             exclude.itemIndex === ci
           )
             return;
-          targets.push(c.from);
-          targets.push(c.from + (c.endAt - c.startFrom));
+          targets.push([c.from, defaultThreshold]);
+          targets.push([c.from + (c.endAt - c.startFrom), defaultThreshold]);
         }),
       );
       state.textTracks.forEach((t, ti) =>
@@ -90,19 +203,19 @@ export const Timeline: React.FC<{
             exclude.itemIndex === si
           )
             return;
-          targets.push(s.from);
-          targets.push(s.from + s.duration);
+          targets.push([s.from, defaultThreshold]);
+          targets.push([s.from + s.duration, defaultThreshold]);
         }),
       );
       let bestTarget: number | null = null;
       let bestCandidate: number | null = null;
-      let bestDist = threshold;
+      let bestDist = Infinity;
       for (const c of candidates) {
-        for (const t of targets) {
-          const d = Math.abs(c - t);
-          if (d <= bestDist) {
+        for (const [value, threshold] of targets) {
+          const d = Math.abs(c - value);
+          if (d <= threshold && d < bestDist) {
             bestDist = d;
-            bestTarget = t;
+            bestTarget = value;
             bestCandidate = c;
           }
         }
@@ -305,11 +418,22 @@ export const Timeline: React.FC<{
             />
             {rows.map((row, i) => {
               const top = RULER_HEIGHT + 4 + i * (TRACK_HEIGHT + TRACK_GAP);
+              const crossTrackHighlight =
+                crossTrackDrag !== null &&
+                crossTrackDrag.kind ===
+                  (row.kind === "text" ? "segment" : "clip") &&
+                crossTrackDrag.targetTrackIndex === row.trackIndex &&
+                crossTrackDrag.targetTrackIndex !==
+                  crossTrackDrag.sourceTrackIndex;
               if (row.kind === "text") {
                 const track = state.textTracks[row.trackIndex];
                 if (!track) return null;
                 return (
-                  <TrackRow key={`text-${row.trackIndex}`} top={top}>
+                  <TrackRow
+                    key={`text-${row.trackIndex}`}
+                    top={top}
+                    dragOver={crossTrackHighlight}
+                  >
                     {track.segments.map((seg, si) => (
                       <SegmentBlock
                         key={`seg-${row.trackIndex}-${si}`}
@@ -333,6 +457,8 @@ export const Timeline: React.FC<{
                         onSeek={onSeek}
                         snapMany={snapMany}
                         clearSnap={clearSnap}
+                        onCrossTrackHover={handleCrossTrackHover}
+                        onCrossTrackEnd={handleCrossTrackEnd}
                       />
                     ))}
                   </TrackRow>
@@ -344,7 +470,9 @@ export const Timeline: React.FC<{
                 <TrackRow
                   key={`video-${row.trackIndex}`}
                   top={top}
-                  dragOver={dragOverTrack === row.trackIndex}
+                  dragOver={
+                    dragOverTrack === row.trackIndex || crossTrackHighlight
+                  }
                   onDragEnter={(e) => {
                     if (!e.dataTransfer.types.includes(ASSET_MIME)) return;
                     e.preventDefault();
@@ -408,6 +536,8 @@ export const Timeline: React.FC<{
                       onSeek={onSeek}
                       snapMany={snapMany}
                       clearSnap={clearSnap}
+                      onCrossTrackHover={handleCrossTrackHover}
+                      onCrossTrackEnd={handleCrossTrackEnd}
                     />
                   ))}
                 </TrackRow>
@@ -428,6 +558,62 @@ export const Timeline: React.FC<{
                 }}
               />
             )}
+            {crossTrackDrag &&
+              crossTrackDrag.targetTrackIndex !==
+                crossTrackDrag.sourceTrackIndex &&
+              (() => {
+                const targetRowIndex = rows.findIndex(
+                  (r) =>
+                    (r.kind === "text"
+                      ? "segment"
+                      : "clip") === crossTrackDrag.kind &&
+                    r.trackIndex === crossTrackDrag.targetTrackIndex,
+                );
+                if (targetRowIndex < 0) return null;
+                const top =
+                  RULER_HEIGHT +
+                  4 +
+                  targetRowIndex * (TRACK_HEIGHT + TRACK_GAP);
+                let previewLeft = 0;
+                let previewWidth = 0;
+                let previewColor = "#2a4d7a";
+                if (crossTrackDrag.kind === "clip") {
+                  const src =
+                    state.videoTracks[crossTrackDrag.sourceTrackIndex];
+                  const item = src?.clips[crossTrackDrag.sourceItemIndex];
+                  if (!item) return null;
+                  previewLeft = item.from * pxPerSec;
+                  previewWidth = Math.max(
+                    6,
+                    (item.endAt - item.startFrom) * pxPerSec,
+                  );
+                } else {
+                  const src =
+                    state.textTracks[crossTrackDrag.sourceTrackIndex];
+                  const item = src?.segments[crossTrackDrag.sourceItemIndex];
+                  if (!item) return null;
+                  previewLeft = item.from * pxPerSec;
+                  previewWidth = Math.max(6, item.duration * pxPerSec);
+                  previewColor = "#7a4d2a";
+                }
+                return (
+                  <div
+                    style={{
+                      position: "absolute",
+                      top,
+                      left: previewLeft,
+                      width: previewWidth,
+                      height: TRACK_HEIGHT,
+                      background: previewColor,
+                      opacity: 0.35,
+                      border: "1px dashed rgba(255,255,255,0.75)",
+                      borderRadius: 4,
+                      pointerEvents: "none",
+                      zIndex: 2,
+                    }}
+                  />
+                );
+              })()}
             <Playhead
               seconds={currentSeconds}
               pxPerSec={pxPerSec}
@@ -681,22 +867,25 @@ const startDrag = (
   e: React.PointerEvent,
   mode: DragMode,
   pxPerSec: number,
-  onDelta: (dSec: number) => void,
-  onEnd?: () => void,
+  onDelta: (dSec: number, yDelta: number) => void,
+  onEnd?: (yDelta: number) => void,
 ) => {
   e.preventDefault();
   e.stopPropagation();
   const startX = e.clientX;
+  const startY = e.clientY;
+  let lastYDelta = 0;
   const target = e.currentTarget as HTMLElement;
   target.setPointerCapture(e.pointerId);
   const move = (ev: PointerEvent) => {
-    onDelta((ev.clientX - startX) / pxPerSec);
+    lastYDelta = ev.clientY - startY;
+    onDelta((ev.clientX - startX) / pxPerSec, lastYDelta);
   };
   const up = () => {
     target.removeEventListener("pointermove", move);
     target.removeEventListener("pointerup", up);
     target.removeEventListener("pointercancel", up);
-    onEnd?.();
+    onEnd?.(lastYDelta);
   };
   target.addEventListener("pointermove", move);
   target.addEventListener("pointerup", up);
@@ -720,6 +909,19 @@ const ClipBlock: React.FC<{
     exclude: { kind: "clip" | "segment"; trackIndex: number; itemIndex: number },
   ) => number;
   clearSnap: () => void;
+  onCrossTrackHover: (
+    kind: "clip" | "segment",
+    sourceTrackIndex: number,
+    sourceItemIndex: number,
+    yDelta: number,
+  ) => void;
+  onCrossTrackEnd: (
+    kind: "clip" | "segment",
+    sourceTrackIndex: number,
+    sourceItemIndex: number,
+    yDelta: number,
+    coalesceKey: string,
+  ) => void;
 }> = ({
   clip,
   trackIndex,
@@ -731,6 +933,8 @@ const ClipBlock: React.FC<{
   onSeek,
   snapMany,
   clearSnap,
+  onCrossTrackHover,
+  onCrossTrackEnd,
 }) => {
   const duration = clip.endAt - clip.startFrom;
   const left = clip.from * pxPerSec;
@@ -752,7 +956,7 @@ const ClipBlock: React.FC<{
       e,
       mode,
       pxPerSec,
-      (dSec) => {
+      (dSec, yDelta) => {
         let effective = dSec;
         if (mode === "left") {
           effective = dSec + snapMany([origin.from + dSec], exclude);
@@ -762,7 +966,14 @@ const ClipBlock: React.FC<{
         } else if (mode === "move") {
           const newLeft = origin.from + dSec;
           const newRight = newLeft + originDuration;
-          effective = dSec + snapMany([newLeft, newRight], exclude);
+          const crossing =
+            Math.abs(yDelta) >= (TRACK_HEIGHT + TRACK_GAP) / 2;
+          effective =
+            dSec +
+            snapMany([newLeft, newRight], exclude, {
+              widePlayhead: crossing,
+            });
+          onCrossTrackHover("clip", trackIndex, itemIndex, yDelta);
         }
         update((prev) => {
           const tracks = prev.videoTracks.slice();
@@ -810,7 +1021,18 @@ const ClipBlock: React.FC<{
           return { ...prev, videoTracks: tracks };
         }, coalesce(mode));
       },
-      clearSnap,
+      (yDelta) => {
+        clearSnap();
+        if (mode === "move") {
+          onCrossTrackEnd(
+            "clip",
+            trackIndex,
+            itemIndex,
+            yDelta,
+            coalesce("move"),
+          );
+        }
+      },
     );
   };
 
@@ -854,6 +1076,19 @@ const SegmentBlock: React.FC<{
     exclude: { kind: "clip" | "segment"; trackIndex: number; itemIndex: number },
   ) => number;
   clearSnap: () => void;
+  onCrossTrackHover: (
+    kind: "clip" | "segment",
+    sourceTrackIndex: number,
+    sourceItemIndex: number,
+    yDelta: number,
+  ) => void;
+  onCrossTrackEnd: (
+    kind: "clip" | "segment",
+    sourceTrackIndex: number,
+    sourceItemIndex: number,
+    yDelta: number,
+    coalesceKey: string,
+  ) => void;
 }> = ({
   segment,
   trackIndex,
@@ -865,6 +1100,8 @@ const SegmentBlock: React.FC<{
   onSeek,
   snapMany,
   clearSnap,
+  onCrossTrackHover,
+  onCrossTrackEnd,
 }) => {
   const left = segment.from * pxPerSec;
   const width = Math.max(6, segment.duration * pxPerSec);
@@ -884,7 +1121,7 @@ const SegmentBlock: React.FC<{
       e,
       mode,
       pxPerSec,
-      (dSec) => {
+      (dSec, yDelta) => {
         let effective = dSec;
         if (mode === "left") {
           effective = dSec + snapMany([origin.from + dSec], exclude);
@@ -894,7 +1131,14 @@ const SegmentBlock: React.FC<{
         } else if (mode === "move") {
           const newLeft = origin.from + dSec;
           const newRight = newLeft + origin.duration;
-          effective = dSec + snapMany([newLeft, newRight], exclude);
+          const crossing =
+            Math.abs(yDelta) >= (TRACK_HEIGHT + TRACK_GAP) / 2;
+          effective =
+            dSec +
+            snapMany([newLeft, newRight], exclude, {
+              widePlayhead: crossing,
+            });
+          onCrossTrackHover("segment", trackIndex, itemIndex, yDelta);
         }
         update((prev) => {
           const tracks = prev.textTracks.slice();
@@ -943,7 +1187,18 @@ const SegmentBlock: React.FC<{
           return { ...prev, textTracks: tracks };
         }, coalesce(mode));
       },
-      clearSnap,
+      (yDelta) => {
+        clearSnap();
+        if (mode === "move") {
+          onCrossTrackEnd(
+            "segment",
+            trackIndex,
+            itemIndex,
+            yDelta,
+            coalesce("move"),
+          );
+        }
+      },
     );
   };
 

@@ -847,24 +847,291 @@ const SaveButton: React.FC<{
   );
 };
 
+type RenderStats = {
+  elapsedMs: number;
+  sizeBytes: number;
+  totalFrames: number;
+  fps: number;
+  workers: number;
+};
+
 type RenderState =
   | { kind: "idle" }
-  | { kind: "preparing" }
+  | { kind: "preparing"; startedAt: number }
   | {
       kind: "rendering";
+      startedAt: number;
       progress: number;
       renderedFrames: number;
       encodedFrames: number;
       totalFrames: number;
+      fps: number;
+      // Populated only in parallel mode. Index = chunk index.
+      chunkProgress?: number[];
     }
-  | { kind: "saving" }
-  | { kind: "done"; outputPath: string }
+  | { kind: "saving"; startedAt: number }
+  | { kind: "done"; outputPath: string; stats: RenderStats }
   | { kind: "error"; message: string };
 
 const defaultRenderName = () => {
   const d = new Date();
   const pad = (n: number) => String(n).padStart(2, "0");
   return `render-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+};
+
+type CodecChoice = "auto" | "av1" | "h265" | "h264";
+type BitratePreset = "very-low" | "low" | "medium" | "high" | "very-high";
+
+const CODEC_PROBES: Array<{ codec: "av1" | "h265" | "h264"; mime: string }> = [
+  { codec: "av1", mime: "av01.0.08M.08" },
+  { codec: "h265", mime: "hev1.1.6.L120.90" },
+  { codec: "h264", mime: "avc1.640028" },
+];
+
+// Returns a map of which codecs this browser's WebCodecs path actually
+// supports at the given resolution/fps. Used to disable unavailable choices
+// in the codec dropdown.
+const probeCodecs = async (
+  width: number,
+  height: number,
+  fps: number,
+): Promise<Record<"av1" | "h265" | "h264", boolean>> => {
+  const out = { av1: false, h265: false, h264: false };
+  const VE = (globalThis as { VideoEncoder?: typeof VideoEncoder }).VideoEncoder;
+  if (!VE) return out;
+  await Promise.all(
+    CODEC_PROBES.map(async ({ codec, mime }) => {
+      try {
+        const res = await VE.isConfigSupported({
+          codec: mime,
+          width,
+          height,
+          framerate: fps,
+          bitrate: 2_000_000,
+          hardwareAcceleration: "prefer-hardware",
+        });
+        out[codec] = !!res.supported;
+      } catch {
+        // probe failed; leave as false
+      }
+    }),
+  );
+  return out;
+};
+
+// Given a support map, return the preferred codec: AV1 > HEVC > H.264.
+const pickAutoCodec = (
+  support: Record<"av1" | "h265" | "h264", boolean>,
+): "av1" | "h265" | "h264" => {
+  if (support.av1) return "av1";
+  if (support.h265) return "h265";
+  return "h264";
+};
+
+const CODEC_LABELS: Record<"av1" | "h265" | "h264", string> = {
+  av1: "AV1",
+  h265: "HEVC (H.265)",
+  h264: "H.264",
+};
+
+// Detect which engine the editor tab is running in. Used to pick matching
+// Playwright browsers for parallel workers, so codec support in workers
+// aligns with what the user expects from their editor tab's behavior.
+type Engine = "webkit" | "chromium";
+const detectEngine = (): Engine => {
+  const ua = navigator.userAgent;
+  // Chrome-family UAs include "Chrome"; pure Safari UAs don't.
+  if (/Chrome\//.test(ua) || /Chromium\//.test(ua) || /Edg\//.test(ua)) {
+    return "chromium";
+  }
+  if (/Safari\//.test(ua)) {
+    return "webkit";
+  }
+  return "chromium";
+};
+
+const BITRATE_LABELS: Record<BitratePreset, string> = {
+  "very-low": "Very low (smallest file)",
+  low: "Low",
+  medium: "Medium (default)",
+  high: "High",
+  "very-high": "Very high (largest file)",
+};
+
+const runSingleRender = async (opts: {
+  filename: string;
+  videoCodec: "av1" | "h265" | "h264";
+  bitrate: BitratePreset;
+  inputProps: MyCompositionProps;
+  durationInFrames: number;
+  fps: number;
+  width: number;
+  height: number;
+  signal: AbortSignal;
+  setState: React.Dispatch<React.SetStateAction<RenderState>>;
+  startedAt: number;
+}) => {
+  const {
+    filename,
+    videoCodec,
+    bitrate,
+    inputProps,
+    durationInFrames,
+    fps,
+    width,
+    height,
+    signal,
+    setState,
+    startedAt,
+  } = opts;
+  const { renderMediaOnWeb } = await import("@remotion/web-renderer");
+  const result = await renderMediaOnWeb({
+    composition: {
+      id: "MyComp",
+      component: MyComposition,
+      durationInFrames,
+      fps,
+      width,
+      height,
+    },
+    inputProps,
+    container: "mp4",
+    videoCodec,
+    videoBitrate: bitrate,
+    muted: true,
+    hardwareAcceleration: "prefer-hardware",
+    outputTarget: "arraybuffer",
+    signal,
+    onProgress: (p) => {
+      setState({
+        kind: "rendering",
+        startedAt,
+        progress: p.progress,
+        renderedFrames: p.renderedFrames,
+        encodedFrames: p.encodedFrames,
+        totalFrames: durationInFrames,
+        fps,
+      });
+    },
+  });
+  const blob = await result.getBlob();
+  setState({ kind: "saving", startedAt });
+  const res = await fetch("/api/save-render", {
+    method: "POST",
+    headers: {
+      "content-type": "video/mp4",
+      "x-filename": encodeURIComponent(`${filename}.mp4`),
+    },
+    body: blob,
+  });
+  const json = await res.json();
+  if (!json.ok) throw new Error(json.error ?? "save failed");
+  setState({
+    kind: "done",
+    outputPath: json.path,
+    stats: {
+      elapsedMs: Date.now() - startedAt,
+      sizeBytes: typeof json.size === "number" ? json.size : blob.size,
+      totalFrames: durationInFrames,
+      fps,
+      workers: 1,
+    },
+  });
+};
+
+// Server-orchestrated parallel render. Streams NDJSON events back as chunk
+// progress arrives; concat happens server-side via ffmpeg and the final
+// file lands in out/<filename>.mp4.
+const runParallelRender = async (opts: {
+  filename: string;
+  workers: number;
+  codec: CodecChoice;
+  bitrate: BitratePreset;
+  signal: AbortSignal;
+  setState: React.Dispatch<React.SetStateAction<RenderState>>;
+  durationInFrames: number;
+  fps: number;
+  startedAt: number;
+}) => {
+  const {
+    filename,
+    workers,
+    codec,
+    bitrate,
+    signal,
+    setState,
+    durationInFrames,
+    fps,
+    startedAt,
+  } = opts;
+  const engine = detectEngine();
+  const res = await fetch("/api/parallel-render", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ filename, workers, codec, bitrate, engine }),
+    signal,
+  });
+  if (!res.body) throw new Error("no response body");
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  const chunkProgress = new Array(workers).fill(0);
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let nl: number;
+    while ((nl = buffer.indexOf("\n")) >= 0) {
+      const line = buffer.slice(0, nl).trim();
+      buffer = buffer.slice(nl + 1);
+      if (!line) continue;
+      try {
+        const ev = JSON.parse(line);
+        if (ev.type === "stage") {
+          // Stage transitions don't update progress; they'll be reflected
+          // indirectly by the next progress event or the final done.
+        } else if (ev.type === "progress") {
+          if (
+            typeof ev.chunk === "number" &&
+            typeof ev.progress === "number" &&
+            ev.chunk >= 0 &&
+            ev.chunk < chunkProgress.length
+          ) {
+            chunkProgress[ev.chunk] = ev.progress;
+          }
+          const overall = ev.overall ?? 0;
+          setState({
+            kind: "rendering",
+            startedAt,
+            progress: overall,
+            renderedFrames: Math.round(overall * durationInFrames),
+            encodedFrames: 0,
+            totalFrames: durationInFrames,
+            fps,
+            chunkProgress: chunkProgress.slice(),
+          });
+        } else if (ev.type === "done") {
+          setState({
+            kind: "done",
+            outputPath: ev.outputPath,
+            stats: {
+              elapsedMs: Date.now() - startedAt,
+              sizeBytes: typeof ev.size === "number" ? ev.size : 0,
+              totalFrames: durationInFrames,
+              fps,
+              workers,
+            },
+          });
+        } else if (ev.type === "error") {
+          throw new Error(ev.message ?? "parallel render failed");
+        }
+      } catch (err) {
+        // Re-throw real errors; swallow JSON parse errors on malformed lines.
+        if (err instanceof SyntaxError) continue;
+        throw err;
+      }
+    }
+  }
 };
 
 const RenderButton: React.FC<{
@@ -887,6 +1154,13 @@ const RenderButton: React.FC<{
   const [open, setOpen] = React.useState(false);
   const [filename, setFilename] = React.useState(defaultRenderName());
   const [state, setState] = React.useState<RenderState>({ kind: "idle" });
+  const [codec, setCodec] = React.useState<CodecChoice>("auto");
+  const [bitrate, setBitrate] = React.useState<BitratePreset>("medium");
+  const [workers, setWorkers] = React.useState<number>(1);
+  const [codecSupport, setCodecSupport] = React.useState<Record<
+    "av1" | "h265" | "h264",
+    boolean
+  > | null>(null);
   const cancelRef = React.useRef<AbortController | null>(null);
   const rootRef = React.useRef<HTMLDivElement>(null);
 
@@ -905,57 +1179,71 @@ const RenderButton: React.FC<{
     return () => document.removeEventListener("mousedown", onDoc);
   }, [open, running]);
 
+  // Probe which codecs this browser actually accepts the first time the
+  // dialog opens — lets us disable unsupported options in the dropdown.
+  React.useEffect(() => {
+    if (!open || codecSupport) return;
+    let cancelled = false;
+    probeCodecs(width, height, fps).then((support) => {
+      if (!cancelled) setCodecSupport(support);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, codecSupport, width, height, fps]);
+
   const startRender = async () => {
     if (dirty) await onSaveFirst();
-    setState({ kind: "preparing" });
+    const startedAt = Date.now();
+    setState({ kind: "preparing", startedAt });
     const controller = new AbortController();
     cancelRef.current = controller;
     try {
-      const { renderMediaOnWeb } = await import("@remotion/web-renderer");
-      const result = await renderMediaOnWeb({
-        composition: {
-          id: "MyComp",
-          component: MyComposition,
+      const safeName = filename || defaultRenderName();
+
+      if (workers > 1) {
+        // For the parallel path we ship the user's raw choice ("auto" or an
+        // explicit codec) to the worker pages. Workers run in headless
+        // Chromium, which has different codec support from the editor tab
+        // (which might be Safari with AV1), so they must probe for
+        // themselves — the editor's probe isn't valid for them.
+        await runParallelRender({
+          filename: safeName,
+          workers,
+          codec,
+          bitrate,
+          signal: controller.signal,
+          setState,
+          durationInFrames,
+          fps,
+          startedAt,
+        });
+      } else {
+        const support =
+          codecSupport ?? (await probeCodecs(width, height, fps));
+        // "auto": pick the best available (AV1 > HEVC > H.264). Otherwise
+        // the user's explicit choice — we still downgrade silently if they
+        // picked one this browser can't encode.
+        const videoCodec =
+          codec === "auto"
+            ? pickAutoCodec(support)
+            : support[codec]
+              ? codec
+              : pickAutoCodec(support);
+        await runSingleRender({
+          filename: safeName,
+          videoCodec,
+          bitrate,
+          inputProps,
           durationInFrames,
           fps,
           width,
           height,
-        },
-        inputProps,
-        container: "mp4",
-        videoCodec: "h264",
-        // No audio yet — suppresses any audio decoding path.
-        muted: true,
-        // Prefer GPU-backed WebCodecs encoder (VideoToolbox on macOS, etc.).
-        hardwareAcceleration: "prefer-hardware",
-        // Always get a Blob back — we POST it to the server to save, so the
-        // output always lands in out/ regardless of File System Access support.
-        outputTarget: "arraybuffer",
-        signal: controller.signal,
-        onProgress: (p) => {
-          setState({
-            kind: "rendering",
-            progress: p.progress,
-            renderedFrames: p.renderedFrames,
-            encodedFrames: p.encodedFrames,
-            totalFrames: durationInFrames,
-          });
-        },
-      });
-      const blob = await result.getBlob();
-      setState({ kind: "saving" });
-      const safeName = filename || defaultRenderName();
-      const res = await fetch("/api/save-render", {
-        method: "POST",
-        headers: {
-          "content-type": "video/mp4",
-          "x-filename": encodeURIComponent(`${safeName}.mp4`),
-        },
-        body: blob,
-      });
-      const json = await res.json();
-      if (!json.ok) throw new Error(json.error ?? "save failed");
-      setState({ kind: "done", outputPath: json.path });
+          signal: controller.signal,
+          setState,
+          startedAt,
+        });
+      }
     } catch (err) {
       setState({ kind: "error", message: (err as Error).message });
     } finally {
@@ -1043,6 +1331,84 @@ const RenderButton: React.FC<{
               >
                 Output: out/{filename || "…"}.mp4
               </div>
+              <div style={{ ...labelStyle, marginTop: 10, marginBottom: 4 }}>
+                Codec
+              </div>
+              <select
+                style={{ ...inputStyle, cursor: "pointer" }}
+                value={codec}
+                onChange={(e) => setCodec(e.target.value as CodecChoice)}
+              >
+                <option value="auto">
+                  Auto
+                  {codecSupport
+                    ? ` — ${CODEC_LABELS[pickAutoCodec(codecSupport)]}`
+                    : ""}
+                </option>
+                {(["av1", "h265", "h264"] as const).map((c) => {
+                  const supported = codecSupport?.[c] ?? true;
+                  return (
+                    <option key={c} value={c} disabled={!supported}>
+                      {CODEC_LABELS[c]}
+                      {codecSupport && !supported ? " — unsupported" : ""}
+                    </option>
+                  );
+                })}
+              </select>
+              <div style={{ ...labelStyle, marginTop: 10, marginBottom: 4 }}>
+                Bitrate
+              </div>
+              <select
+                style={{ ...inputStyle, cursor: "pointer" }}
+                value={bitrate}
+                onChange={(e) => setBitrate(e.target.value as BitratePreset)}
+              >
+                {(
+                  [
+                    "very-low",
+                    "low",
+                    "medium",
+                    "high",
+                    "very-high",
+                  ] as const
+                ).map((b) => (
+                  <option key={b} value={b}>
+                    {BITRATE_LABELS[b]}
+                  </option>
+                ))}
+              </select>
+              <div style={{ ...labelStyle, marginTop: 10, marginBottom: 4 }}>
+                Workers
+              </div>
+              <select
+                style={{ ...inputStyle, cursor: "pointer" }}
+                value={workers}
+                onChange={(e) => setWorkers(Number(e.target.value))}
+              >
+                <option value={1}>1 — in-browser (fastest startup)</option>
+                {[2, 3, 4, 5, 6, 7, 8].map((n) => (
+                  <option key={n} value={n}>
+                    {n} — parallel
+                  </option>
+                ))}
+              </select>
+              {workers > 1 && (
+                <div
+                  style={{
+                    marginTop: 4,
+                    color: "#c9a94b",
+                    fontSize: 11,
+                    lineHeight: 1.4,
+                  }}
+                >
+                  Spawns {workers} headless Playwright{" "}
+                  {detectEngine() === "webkit" ? "WebKit" : "Chromium"}{" "}
+                  processes (matched to this tab's engine), concats with
+                  ffmpeg. Detected{" "}
+                  {navigator.hardwareConcurrency ?? "?"} logical cores —
+                  try larger values if CPU is under-utilized.
+                </div>
+              )}
               <div style={{ display: "flex", gap: 6, marginTop: 12 }}>
                 <button style={splitBtnStyle} onClick={() => setOpen(false)}>
                   Cancel
@@ -1071,7 +1437,8 @@ const RenderButton: React.FC<{
               <div style={{ color: "#8fd48b", marginBottom: 8 }}>
                 ✓ Saved to {state.outputPath}
               </div>
-              <div style={{ display: "flex", gap: 6 }}>
+              <RenderStatsRow stats={state.stats} />
+              <div style={{ display: "flex", gap: 6, marginTop: 10 }}>
                 <button
                   style={splitBtnStyle}
                   onClick={() => {
@@ -1122,6 +1489,67 @@ const RenderButton: React.FC<{
   );
 };
 
+const RenderStatsRow: React.FC<{ stats: RenderStats }> = ({ stats }) => {
+  const elapsedSec = stats.elapsedMs / 1000;
+  const durationSec = stats.totalFrames / stats.fps;
+  const realtimeMultiplier = durationSec > 0 ? durationSec / elapsedSec : 0;
+  const effectiveFps = elapsedSec > 0 ? stats.totalFrames / elapsedSec : 0;
+  const sizeMB = stats.sizeBytes / (1024 * 1024);
+  const bitrateMbps =
+    durationSec > 0 ? (stats.sizeBytes * 8) / (durationSec * 1_000_000) : 0;
+
+  const rows: Array<[string, string]> = [
+    ["Time", `${elapsedSec.toFixed(1)}s`],
+    [
+      "Speed",
+      realtimeMultiplier > 0
+        ? `${realtimeMultiplier.toFixed(2)}× realtime · ${effectiveFps.toFixed(0)} fps`
+        : "—",
+    ],
+    [
+      "Size",
+      sizeMB > 0
+        ? `${sizeMB.toFixed(1)} MB · ${bitrateMbps.toFixed(1)} Mbps`
+        : "—",
+    ],
+    [
+      "Workers",
+      stats.workers === 1 ? "1 (in-browser)" : `${stats.workers} (parallel)`,
+    ],
+  ];
+  return (
+    <div
+      style={{
+        background: "#0b0b0e",
+        border: "1px solid #2e2e38",
+        borderRadius: 6,
+        padding: "8px 10px",
+        display: "grid",
+        gridTemplateColumns: "auto 1fr",
+        columnGap: 10,
+        rowGap: 4,
+        fontSize: 11,
+        fontVariantNumeric: "tabular-nums",
+      }}
+    >
+      {rows.map(([label, value]) => (
+        <React.Fragment key={label}>
+          <div style={{ color: "#70707a" }}>{label}</div>
+          <div style={{ color: "#e8e8ea" }}>{value}</div>
+        </React.Fragment>
+      ))}
+    </div>
+  );
+};
+
+const formatDuration = (sec: number): string => {
+  if (!isFinite(sec) || sec < 0) return "—";
+  if (sec < 60) return `${sec.toFixed(1)}s`;
+  const m = Math.floor(sec / 60);
+  const s = Math.round(sec - m * 60);
+  return `${m}m ${s}s`;
+};
+
 const RenderProgress: React.FC<{
   state: Extract<
     RenderState,
@@ -1129,6 +1557,12 @@ const RenderProgress: React.FC<{
   >;
   onCancel: () => void;
 }> = ({ state, onCancel }) => {
+  // Tick every 250ms so elapsed time keeps updating between progress events.
+  const [, setNow] = React.useState(0);
+  React.useEffect(() => {
+    const id = setInterval(() => setNow((n) => n + 1), 250);
+    return () => clearInterval(id);
+  }, []);
   const bar = (pct: number, color: string) => (
     <div
       style={{
@@ -1182,6 +1616,13 @@ const RenderProgress: React.FC<{
   const p = state.progress;
   const frames = state.renderedFrames;
   const total = state.totalFrames;
+  const chunkProgress = state.chunkProgress;
+  const elapsedSec = (Date.now() - state.startedAt) / 1000;
+  const etaSec = p > 0.01 ? elapsedSec / p - elapsedSec : Infinity;
+  const liveFps = elapsedSec > 0.5 ? frames / elapsedSec : 0;
+  const videoSec = total / state.fps;
+  const realtimeMultiplier =
+    elapsedSec > 0.5 && p > 0 ? (videoSec * p) / elapsedSec : 0;
   return (
     <div>
       <div style={{ marginBottom: 6 }}>
@@ -1189,6 +1630,66 @@ const RenderProgress: React.FC<{
         {total > 0 ? ` / ${total}` : ""} frames ({Math.round(p * 100)}%)
       </div>
       {bar(p, "#a13a2a")}
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          marginTop: 6,
+          color: "#8b8b94",
+          fontSize: 11,
+          fontVariantNumeric: "tabular-nums",
+        }}
+      >
+        <span>Elapsed {formatDuration(elapsedSec)}</span>
+        <span>ETA {formatDuration(etaSec)}</span>
+        <span>
+          {liveFps > 0 ? `${liveFps.toFixed(0)} fps` : "—"}
+          {realtimeMultiplier > 0
+            ? ` · ${realtimeMultiplier.toFixed(2)}×`
+            : ""}
+        </span>
+      </div>
+      {chunkProgress && chunkProgress.length > 1 && (
+        <div
+          style={{
+            marginTop: 10,
+            display: "flex",
+            flexDirection: "column",
+            gap: 4,
+          }}
+        >
+          {chunkProgress.map((cp, i) => (
+            <div
+              key={i}
+              style={{ display: "flex", alignItems: "center", gap: 8 }}
+            >
+              <span
+                style={{
+                  width: 48,
+                  fontSize: 10,
+                  color: "#8b8b94",
+                  flex: "0 0 auto",
+                }}
+              >
+                Chunk {i + 1}
+              </span>
+              <div style={{ flex: 1 }}>{bar(cp, "#6a9ad8")}</div>
+              <span
+                style={{
+                  width: 36,
+                  textAlign: "right",
+                  fontSize: 10,
+                  color: "#8b8b94",
+                  flex: "0 0 auto",
+                  fontVariantNumeric: "tabular-nums",
+                }}
+              >
+                {Math.round(cp * 100)}%
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
       {cancelRow}
     </div>
   );

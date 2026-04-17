@@ -150,6 +150,7 @@ const TextOverlay: React.FC<{
           textAlign: "center",
           lineHeight: 1.4,
           letterSpacing: -0.3,
+          whiteSpace: "pre-wrap",
         }}
       >
         {text}

@@ -1360,7 +1360,7 @@ function attachDabinkyMiddlewares(
             try {
               const { path: relPath } = JSON.parse(body) as { path?: string };
               if (!relPath) throw new Error("missing path");
-              const abs = path.resolve(repoRoot, relPath);
+              const abs = path.resolve(dataRoot, relPath);
               if (!abs.startsWith(outDir + path.sep))
                 throw new Error("only files under out/ can be revealed");
               if (!fs.existsSync(abs)) throw new Error("file not found");

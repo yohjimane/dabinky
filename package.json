@@ -10,6 +10,7 @@
     "@remotion/media": "^4.0.441",
     "@remotion/player": "4.0.441",
     "@remotion/tailwind-v4": "4.0.441",
+    "fflate": "^0.8.2",
     "react": "19.2.3",
     "react-dom": "19.2.3",
     "remotion": "4.0.441",

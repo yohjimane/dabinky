@@ -2,7 +2,18 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import fs from "node:fs";
 import path from "node:path";
+import os from "node:os";
+import crypto from "node:crypto";
 import { spawn } from "node:child_process";
+import {
+  Zip,
+  ZipDeflate,
+  ZipPassThrough,
+  Unzip,
+  UnzipInflate,
+  type UnzipFile,
+} from "fflate";
+import { z } from "zod";
 
 const repoRoot = path.resolve(__dirname);
 const jsonPath = path.join(repoRoot, "src/data/composition.json");
@@ -17,6 +28,69 @@ const outDir = path.join(repoRoot, "out");
 // parallel-render pipeline. Cleaned up after each successful concat.
 const chunksDir = path.join(outDir, ".chunks");
 const VIDEO_EXT = new Set([".mp4", ".mov", ".webm", ".mkv", ".m4v"]);
+
+// .dabinky bundle format. formatVersion is written into manifest.json; bump
+// when the on-disk shape changes in a way that requires a migration on import.
+const DABINKY_FORMAT_VERSION = 1;
+const DABINKY_MAX_IMPORT_BYTES = 5 * 1024 * 1024 * 1024;
+const pkgVersion = (() => {
+  try {
+    return (
+      JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8"))
+        .version ?? "0.0.0"
+    );
+  } catch {
+    return "0.0.0";
+  }
+})();
+
+// Minimal schemas used to validate an incoming composition.json at import
+// time. Intentionally duplicated from src/Composition.tsx — importing the
+// editor schema would pull Remotion/React into the vite config. Keep these in
+// sync when the real schema evolves.
+const ImportClipSchema = z.object({
+  src: z.string(),
+  from: z.number(),
+  startFrom: z.number(),
+  endAt: z.number(),
+  fadeIn: z.number().optional(),
+  fadeOut: z.number().optional(),
+});
+const ImportVideoTrackSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  clips: z.array(ImportClipSchema),
+});
+const ImportTextSegmentSchema = z.object({
+  from: z.number(),
+  duration: z.number(),
+  text: z.string(),
+  fadeIn: z.number().optional(),
+  fadeOut: z.number().optional(),
+});
+const ImportTextTrackSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  segments: z.array(ImportTextSegmentSchema),
+});
+const ImportCompositionSchema = z.object({
+  fadeDuration: z.number(),
+  fontSize: z.number(),
+  textColor: z.string(),
+  bgColor: z.string(),
+  bgBorderRadius: z.number(),
+  paddingBottom: z.number(),
+  videoTracks: z.array(ImportVideoTrackSchema),
+  textTracks: z.array(ImportTextTrackSchema),
+});
+const ImportManifestSchema = z.object({
+  formatVersion: z.number(),
+  createdAt: z.string().optional(),
+  editorVersion: z.string().optional(),
+});
+type ImportComposition = z.infer<typeof ImportCompositionSchema>;
+
+const MEDIA_ENTRY_NAME_RE = /^[A-Za-z0-9._ -]+\.[A-Za-z0-9]+$/;
 
 // State for in-flight parallel renders. Each render has N pending chunk
 // promises (resolved when /api/save-chunk writes the blob), a progress array,
@@ -178,6 +252,480 @@ export default defineConfig({
           res.statusCode = 405;
           res.end("method not allowed");
         });
+        // Export the current project (composition.json + referenced media)
+        // as a streamed .dabinky ZIP. ZipPassThrough on MP4s skips deflate
+        // (already-compressed payload, saves CPU for ~0 bytes), ZipDeflate on
+        // the small JSON files.
+        server.middlewares.use("/api/export-project", (req, res) => {
+          if (req.method !== "GET") {
+            res.statusCode = 405;
+            res.end("method not allowed");
+            return;
+          }
+          let compositionRaw: string;
+          let composition: unknown;
+          try {
+            if (!fs.existsSync(jsonPath) && fs.existsSync(defaultJsonPath)) {
+              fs.copyFileSync(defaultJsonPath, jsonPath);
+            }
+            compositionRaw = fs.readFileSync(jsonPath, "utf8");
+            composition = JSON.parse(compositionRaw);
+          } catch (err) {
+            res.statusCode = 500;
+            res.setHeader("content-type", "application/json");
+            res.end(
+              JSON.stringify({ ok: false, error: (err as Error).message }),
+            );
+            return;
+          }
+
+          // Collect unique referenced media files. Split clips share a src,
+          // so dedupe by path — don't embed the same MP4 three times.
+          const seen = new Set<string>();
+          const mediaFiles: { absPath: string; entryName: string }[] = [];
+          const missingRefs: string[] = [];
+          const videoTracks =
+            (composition as { videoTracks?: unknown }).videoTracks;
+          if (Array.isArray(videoTracks)) {
+            for (const track of videoTracks) {
+              const clips = (track as { clips?: unknown }).clips;
+              if (!Array.isArray(clips)) continue;
+              for (const clip of clips) {
+                const src = (clip as { src?: unknown }).src;
+                if (typeof src !== "string" || seen.has(src)) continue;
+                seen.add(src);
+                const abs = resolveAssetPath(src);
+                if (!abs || !fs.existsSync(abs) || !fs.statSync(abs).isFile()) {
+                  missingRefs.push(src);
+                  continue;
+                }
+                mediaFiles.push({
+                  absPath: abs,
+                  entryName: `media/${path.basename(src)}`,
+                });
+              }
+            }
+          }
+
+          const url = new URL(req.url ?? "", "http://localhost");
+          const rawName = (url.searchParams.get("filename") ?? "").trim();
+          const cleanName =
+            (rawName || `project-${Date.now()}`)
+              .replace(/[^A-Za-z0-9._ -]/g, "_")
+              .replace(/\.dabinky$/i, "") + ".dabinky";
+
+          const manifest = {
+            formatVersion: DABINKY_FORMAT_VERSION,
+            createdAt: new Date().toISOString(),
+            editorVersion: pkgVersion,
+            missingMedia: missingRefs,
+          };
+
+          res.setHeader("content-type", "application/zip");
+          res.setHeader(
+            "content-disposition",
+            `attachment; filename="${cleanName.replace(/"/g, "")}"`,
+          );
+
+          let aborted = false;
+          res.on("close", () => {
+            if (!res.writableFinished) aborted = true;
+          });
+
+          const zip = new Zip();
+          zip.ondata = (err, chunk, final) => {
+            if (err) {
+              if (!res.writableEnded) res.destroy(err);
+              return;
+            }
+            if (res.writableEnded) return;
+            res.write(chunk);
+            if (final) res.end();
+          };
+
+          // Order matters for streaming importers: manifest + composition
+          // first so an importer can validate before touching any media.
+          const manifestEntry = new ZipDeflate("manifest.json", { level: 6 });
+          zip.add(manifestEntry);
+          manifestEntry.push(
+            new Uint8Array(Buffer.from(JSON.stringify(manifest, null, 2))),
+            true,
+          );
+
+          const compEntry = new ZipDeflate("composition.json", { level: 6 });
+          zip.add(compEntry);
+          compEntry.push(new Uint8Array(Buffer.from(compositionRaw)), true);
+
+          // Stream each media file through ZipPassThrough. Sequential rather
+          // than parallel — fflate's Zip requires a single in-flight entry.
+          (async () => {
+            for (const { absPath, entryName } of mediaFiles) {
+              if (aborted) return;
+              await new Promise<void>((resolve, reject) => {
+                const entry = new ZipPassThrough(entryName);
+                zip.add(entry);
+                const stream = fs.createReadStream(absPath);
+                stream.on("data", (chunk) => {
+                  const buf = chunk as Buffer;
+                  entry.push(
+                    new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength),
+                    false,
+                  );
+                });
+                stream.on("end", () => {
+                  entry.push(new Uint8Array(0), true);
+                  resolve();
+                });
+                stream.on("error", (err) => {
+                  entry.push(new Uint8Array(0), true);
+                  reject(err);
+                });
+              });
+            }
+            if (!aborted) zip.end();
+          })().catch((err) => {
+            if (!res.writableEnded) res.destroy(err);
+          });
+        });
+
+        // Import a .dabinky ZIP: extract into a temp dir, validate, then
+        // commit. Media collisions are resolved by SHA-256: byte-identical
+        // files reuse the existing asset (no duplication on re-import), and
+        // differing contents get a numeric suffix with clip.src rewritten to
+        // match.
+        server.middlewares.use("/api/import-project", (req, res) => {
+          if (req.method !== "POST") {
+            res.statusCode = 405;
+            res.end("method not allowed");
+            return;
+          }
+
+          const importId = crypto.randomBytes(8).toString("hex");
+          const tempDir = path.join(os.tmpdir(), `dabinky-import-${importId}`);
+          fs.mkdirSync(tempDir, { recursive: true });
+
+          const cleanup = () => {
+            try {
+              fs.rmSync(tempDir, { recursive: true, force: true });
+            } catch {
+              // ignore
+            }
+          };
+          const fail = (status: number, msg: string) => {
+            cleanup();
+            if (res.headersSent) return;
+            res.statusCode = status;
+            res.setHeader("content-type", "application/json");
+            res.end(JSON.stringify({ ok: false, error: msg }));
+          };
+
+          let manifestChunks: Buffer[] | null = null;
+          let compositionChunks: Buffer[] | null = null;
+          // One entry per media/ file. originalBasename is the name as it
+          // appeared in the archive (used to match clip.src). tempPath is
+          // where we streamed it; fileClosed resolves when the write stream
+          // emits "close" so we know it's safe to hash and move.
+          const mediaEntries: {
+            originalBasename: string;
+            tempPath: string;
+            fileClosed: Promise<void>;
+          }[] = [];
+          let totalBytes = 0;
+          let parseError: Error | null = null;
+
+          const unzip = new Unzip();
+          unzip.register(UnzipInflate);
+
+          unzip.onfile = (file: UnzipFile) => {
+            if (parseError) return;
+            const name = file.name;
+            // Reject path traversal regardless of where in the tree: fflate
+            // exposes the raw entry name, so `..` or absolute-path segments
+            // must be blocked explicitly.
+            if (
+              name.includes("\0") ||
+              name.includes("..") ||
+              name.startsWith("/") ||
+              path.isAbsolute(name)
+            ) {
+              parseError = new Error(`invalid entry path: ${name}`);
+              return;
+            }
+
+            if (name === "manifest.json") {
+              const chunks: Buffer[] = [];
+              manifestChunks = chunks;
+              file.ondata = (err, dat) => {
+                if (err) {
+                  parseError = err;
+                  return;
+                }
+                chunks.push(Buffer.from(dat));
+              };
+              file.start();
+              return;
+            }
+            if (name === "composition.json") {
+              const chunks: Buffer[] = [];
+              compositionChunks = chunks;
+              file.ondata = (err, dat) => {
+                if (err) {
+                  parseError = err;
+                  return;
+                }
+                chunks.push(Buffer.from(dat));
+              };
+              file.start();
+              return;
+            }
+            if (name.startsWith("media/")) {
+              const rest = name.slice("media/".length);
+              if (!MEDIA_ENTRY_NAME_RE.test(rest)) {
+                parseError = new Error(`invalid media filename: ${name}`);
+                return;
+              }
+              const ext = path.extname(rest).toLowerCase();
+              if (!VIDEO_EXT.has(ext)) {
+                parseError = new Error(
+                  `unsupported media extension: ${ext || "(none)"}`,
+                );
+                return;
+              }
+              const tempPath = path.join(tempDir, rest);
+              const out = fs.createWriteStream(tempPath);
+              const fileClosed = new Promise<void>((resolve, reject) => {
+                out.on("close", () => resolve());
+                out.on("error", reject);
+              });
+              mediaEntries.push({
+                originalBasename: rest,
+                tempPath,
+                fileClosed,
+              });
+              file.ondata = (err, dat, final) => {
+                if (err) {
+                  parseError = err;
+                  out.destroy();
+                  return;
+                }
+                totalBytes += dat.length;
+                if (totalBytes > DABINKY_MAX_IMPORT_BYTES) {
+                  parseError = new Error(
+                    `import exceeds ${DABINKY_MAX_IMPORT_BYTES} byte cap`,
+                  );
+                  out.destroy();
+                  return;
+                }
+                out.write(Buffer.from(dat));
+                if (final) out.end();
+              };
+              file.start();
+              return;
+            }
+            parseError = new Error(`unexpected entry: ${name}`);
+          };
+
+          req.on("data", (chunk: Buffer) => {
+            if (parseError) return;
+            try {
+              unzip.push(
+                new Uint8Array(
+                  chunk.buffer,
+                  chunk.byteOffset,
+                  chunk.byteLength,
+                ),
+                false,
+              );
+            } catch (err) {
+              parseError = err as Error;
+            }
+          });
+
+          req.on("error", (err) => fail(400, err.message));
+
+          req.on("end", async () => {
+            if (parseError) {
+              return fail(400, parseError.message);
+            }
+            try {
+              unzip.push(new Uint8Array(0), true);
+            } catch (err) {
+              return fail(400, (err as Error).message);
+            }
+            if (parseError) {
+              return fail(400, (parseError as Error).message);
+            }
+
+            try {
+              await Promise.all(mediaEntries.map((e) => e.fileClosed));
+            } catch (err) {
+              return fail(500, (err as Error).message);
+            }
+
+            if (!manifestChunks) return fail(400, "missing manifest.json");
+            if (!compositionChunks)
+              return fail(400, "missing composition.json");
+
+            let manifest: z.infer<typeof ImportManifestSchema>;
+            try {
+              const manifestJson = JSON.parse(
+                Buffer.concat(manifestChunks).toString("utf8"),
+              );
+              const parsed = ImportManifestSchema.safeParse(manifestJson);
+              if (!parsed.success) {
+                return fail(
+                  400,
+                  `invalid manifest: ${parsed.error.issues
+                    .map((i) => i.message)
+                    .join("; ")}`,
+                );
+              }
+              manifest = parsed.data;
+            } catch (err) {
+              return fail(400, `malformed manifest.json: ${(err as Error).message}`);
+            }
+            if (manifest.formatVersion > DABINKY_FORMAT_VERSION) {
+              return fail(
+                400,
+                `unsupported formatVersion ${manifest.formatVersion}; this editor supports up to ${DABINKY_FORMAT_VERSION}`,
+              );
+            }
+
+            let composition: ImportComposition;
+            try {
+              const compJson = JSON.parse(
+                Buffer.concat(compositionChunks).toString("utf8"),
+              );
+              const parsed = ImportCompositionSchema.safeParse(compJson);
+              if (!parsed.success) {
+                return fail(
+                  400,
+                  `invalid composition: ${parsed.error.issues
+                    .map((i) => `${i.path.join(".")}: ${i.message}`)
+                    .join("; ")}`,
+                );
+              }
+              composition = parsed.data;
+            } catch (err) {
+              return fail(
+                400,
+                `malformed composition.json: ${(err as Error).message}`,
+              );
+            }
+
+            ensureMediaDir();
+
+            // Hash each imported media file and compare to any existing file
+            // with the same basename. Byte-identical → reuse. Different → pick
+            // a "<stem>-N<ext>" suffix and track the rename so we can rewrite
+            // clip.src below.
+            const hashFile = (p: string): string => {
+              const h = crypto.createHash("sha256");
+              h.update(fs.readFileSync(p));
+              return h.digest("hex");
+            };
+            const renameMap = new Map<string, string>();
+            const reusedExisting = new Set<string>();
+            try {
+              for (const entry of mediaEntries) {
+                const existing = path.join(mediaDir, entry.originalBasename);
+                if (!fs.existsSync(existing)) {
+                  renameMap.set(entry.originalBasename, entry.originalBasename);
+                  continue;
+                }
+                if (hashFile(existing) === hashFile(entry.tempPath)) {
+                  renameMap.set(entry.originalBasename, entry.originalBasename);
+                  reusedExisting.add(entry.originalBasename);
+                  continue;
+                }
+                const ext = path.extname(entry.originalBasename);
+                const stem = entry.originalBasename.slice(
+                  0,
+                  entry.originalBasename.length - ext.length,
+                );
+                let i = 1;
+                let candidate = `${stem}-${i}${ext}`;
+                while (fs.existsSync(path.join(mediaDir, candidate))) {
+                  i += 1;
+                  candidate = `${stem}-${i}${ext}`;
+                }
+                renameMap.set(entry.originalBasename, candidate);
+              }
+            } catch (err) {
+              return fail(500, `hash/compare failed: ${(err as Error).message}`);
+            }
+
+            try {
+              for (const entry of mediaEntries) {
+                if (reusedExisting.has(entry.originalBasename)) {
+                  fs.unlinkSync(entry.tempPath);
+                  continue;
+                }
+                const finalName = renameMap.get(entry.originalBasename)!;
+                const targetAbs = path.join(mediaDir, finalName);
+                if (!targetAbs.startsWith(mediaDir + path.sep)) {
+                  return fail(400, `resolved media path escapes media dir: ${finalName}`);
+                }
+                fs.renameSync(entry.tempPath, targetAbs);
+              }
+            } catch (err) {
+              return fail(500, `media install failed: ${(err as Error).message}`);
+            }
+
+            // Rewrite clip.src for renames, and normalize to media/<name> for
+            // any referenced asset we just installed.
+            const warnings: string[] = [];
+            const missing: string[] = [];
+            for (const track of composition.videoTracks) {
+              for (const clip of track.clips) {
+                const base = path.basename(clip.src);
+                if (renameMap.has(base)) {
+                  const finalName = renameMap.get(base)!;
+                  clip.src = `media/${finalName}`;
+                } else {
+                  const abs = resolveAssetPath(clip.src);
+                  if (!abs || !fs.existsSync(abs)) missing.push(clip.src);
+                }
+              }
+            }
+            if (missing.length > 0) {
+              warnings.push(
+                `missing media (not included in archive, not present locally): ${Array.from(
+                  new Set(missing),
+                ).join(", ")}`,
+              );
+            }
+            if (Array.isArray(manifest.missingMedia) && manifest.missingMedia.length > 0) {
+              warnings.push(
+                `archive was exported with missing assets: ${manifest.missingMedia.join(", ")}`,
+              );
+            }
+
+            try {
+              fs.writeFileSync(
+                jsonPath,
+                JSON.stringify(composition, null, 2) + "\n",
+              );
+            } catch (err) {
+              return fail(500, `composition write failed: ${(err as Error).message}`);
+            }
+
+            cleanup();
+            res.setHeader("content-type", "application/json");
+            res.end(
+              JSON.stringify({
+                ok: true,
+                composition,
+                warnings,
+                mediaFiles: Array.from(renameMap.values()).map(
+                  (n) => `media/${n}`,
+                ),
+                manifest,
+              }),
+            );
+          });
+        });
+
         server.middlewares.use("/api/upload", (req, res) => {
           if (req.method !== "POST") {
             res.statusCode = 405;

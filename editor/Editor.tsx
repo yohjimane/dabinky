@@ -563,6 +563,84 @@ const EditorInner: React.FC<{ initial: MyCompositionProps }> = ({
     setTimeout(() => setSaveMsg(""), 3500);
   };
 
+  const importInputRef = React.useRef<HTMLInputElement>(null);
+
+  // The server reads composition.json from disk when assembling the archive,
+  // so unsaved in-memory edits have to be flushed first or they won't be in
+  // the exported bundle.
+  const exportProject = useCallback(async () => {
+    try {
+      if (dirty) await save();
+      const stamp = new Date()
+        .toISOString()
+        .slice(0, 19)
+        .replace(/[:T]/g, "-");
+      const filename = `project-${stamp}`;
+      const a = document.createElement("a");
+      a.href = `/api/export-project?filename=${encodeURIComponent(filename)}`;
+      a.rel = "noopener";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      flash("Export started");
+    } catch (err) {
+      setSaveMsg(`Export error: ${(err as Error).message}`);
+    }
+  }, [dirty, save]);
+
+  const openImportPicker = useCallback(() => {
+    if (
+      dirty &&
+      !window.confirm(
+        "You have unsaved changes. Importing will replace the current project and discard them. Continue?",
+      )
+    ) {
+      return;
+    }
+    importInputRef.current?.click();
+  }, [dirty]);
+
+  const handleImportFile = useCallback(
+    async (e: React.ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0];
+      // Reset the input so choosing the same file a second time still fires
+      // change — otherwise a failed import can't be retried with the same file.
+      e.target.value = "";
+      if (!file) return;
+      setSaving(true);
+      setSaveMsg("Importing…");
+      try {
+        const res = await fetch("/api/import-project", {
+          method: "POST",
+          headers: { "content-type": "application/zip" },
+          body: file,
+        });
+        const json = await res.json();
+        if (!res.ok || !json.ok)
+          throw new Error(json.error ?? `HTTP ${res.status}`);
+        const imported = json.composition as MyCompositionProps;
+        reset(imported);
+        setSavedSnapshot(imported);
+        setSelected(null);
+        // Bounce MediaPool's asset list — freshly imported media files won't
+        // show up otherwise until the next manual refresh.
+        setAssetRefreshKey((k) => k + 1);
+        const warnings = Array.isArray(json.warnings) ? json.warnings : [];
+        setSaveMsg(
+          warnings.length
+            ? `Imported ✓ — ${warnings.join("; ")}`
+            : "Imported ✓",
+        );
+        setTimeout(() => setSaveMsg(""), warnings.length ? 6000 : 2500);
+      } catch (err) {
+        setSaveMsg(`Import error: ${(err as Error).message}`);
+      } finally {
+        setSaving(false);
+      }
+    },
+    [reset],
+  );
+
   const usedSources = useMemo(() => {
     const set = new Set<string>();
     for (const t of state.videoTracks) for (const c of t.clips) set.add(c.src);
@@ -615,6 +693,25 @@ const EditorInner: React.FC<{ initial: MyCompositionProps }> = ({
           <IconButton onClick={revert} title="Reload from disk">
             Revert
           </IconButton>
+          <IconButton
+            onClick={openImportPicker}
+            title="Import a .dabinky project archive"
+          >
+            ⇡ Import
+          </IconButton>
+          <IconButton
+            onClick={exportProject}
+            title="Download this project as a .dabinky archive"
+          >
+            ⇣ Export
+          </IconButton>
+          <input
+            ref={importInputRef}
+            type="file"
+            accept=".dabinky,application/zip"
+            onChange={handleImportFile}
+            style={{ display: "none" }}
+          />
           <SaveButton dirty={dirty} saving={saving} onClick={save} />
           <RenderButton
             dirty={dirty}

@@ -1271,8 +1271,52 @@ const RenderButton: React.FC<{
     "av1" | "h265" | "h264",
     boolean
   > | null>(null);
+  const [outputDir, setOutputDir] = React.useState<string>("");
+  const [outputDirDraft, setOutputDirDraft] = React.useState<string>("");
+  const [outputDirSaving, setOutputDirSaving] = React.useState(false);
   const cancelRef = React.useRef<AbortController | null>(null);
   const rootRef = React.useRef<HTMLDivElement>(null);
+
+  React.useEffect(() => {
+    if (!open) return;
+    fetch("/api/settings")
+      .then((r) => r.json())
+      .then((s: { outputDir?: string }) => {
+        if (typeof s.outputDir === "string") {
+          setOutputDir(s.outputDir);
+          setOutputDirDraft(s.outputDir);
+        }
+      })
+      .catch(() => {
+        // Non-fatal: render still works, just without surfacing the folder.
+      });
+  }, [open]);
+
+  const commitOutputDir = async () => {
+    const next = outputDirDraft.trim();
+    if (!next || next === outputDir) {
+      setOutputDirDraft(outputDir);
+      return;
+    }
+    setOutputDirSaving(true);
+    try {
+      const res = await fetch("/api/settings", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ outputDir: next }),
+      });
+      const json = await res.json();
+      if (!res.ok || !json.ok)
+        throw new Error(json.error ?? `HTTP ${res.status}`);
+      const saved = json.settings?.outputDir ?? next;
+      setOutputDir(saved);
+      setOutputDirDraft(saved);
+    } catch {
+      setOutputDirDraft(outputDir);
+    } finally {
+      setOutputDirSaving(false);
+    }
+  };
 
   const running =
     state.kind === "preparing" ||
@@ -1435,14 +1479,41 @@ const RenderButton: React.FC<{
                 />
                 <span style={{ color: "#70707a", fontSize: 11 }}>.mp4</span>
               </div>
+              <div style={{ ...labelStyle, marginTop: 10, marginBottom: 4 }}>
+                Output folder
+              </div>
+              <input
+                style={{
+                  ...inputStyle,
+                  opacity: outputDirSaving ? 0.6 : 1,
+                }}
+                value={outputDirDraft}
+                disabled={outputDirSaving}
+                placeholder="~/Movies/Dabinky"
+                onChange={(e) => setOutputDirDraft(e.target.value)}
+                onBlur={commitOutputDir}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    (e.target as HTMLInputElement).blur();
+                  } else if (e.key === "Escape") {
+                    setOutputDirDraft(outputDir);
+                    (e.target as HTMLInputElement).blur();
+                  }
+                }}
+                title="Folder renders get saved into. Press Enter to save."
+              />
               <div
                 style={{
                   marginTop: 4,
                   color: "#70707a",
                   fontSize: 11,
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
                 }}
+                title={`${outputDir || "…"}/${filename || "…"}.mp4`}
               >
-                Output: out/{filename || "…"}.mp4
+                Saves to: {outputDir || "…"}/{filename || "…"}.mp4
               </div>
               <div style={{ ...labelStyle, marginTop: 10, marginBottom: 4 }}>
                 Codec

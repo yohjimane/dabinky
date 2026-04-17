@@ -53,8 +53,42 @@ const outDir = usingExternalDataRoot
   ? path.join(dataRoot, "out")
   : path.join(repoRoot, "out");
 // Per-render temporary directory for intermediate chunk files produced by the
-// parallel-render pipeline. Cleaned up after each successful concat.
+// parallel-render pipeline. Cleaned up after each successful concat. Always
+// lives under dataRoot regardless of user's chosen outputDir so the user's
+// Movies folder never gets littered with .chunks debris.
 const chunksDir = path.join(outDir, ".chunks");
+
+// User-level settings stored at dataRoot/settings.json. Currently only holds
+// outputDir (where rendered MP4s land). Default is ~/Movies/Dabinky on macOS
+// since that's the native location Finder surfaces for videos.
+const settingsPath = path.join(dataRoot, "settings.json");
+const DEFAULT_OUTPUT_DIR = path.join(os.homedir(), "Movies", "Dabinky");
+
+type DabinkySettings = {
+  outputDir: string;
+};
+
+const readSettings = (): DabinkySettings => {
+  try {
+    if (!fs.existsSync(settingsPath)) {
+      return { outputDir: DEFAULT_OUTPUT_DIR };
+    }
+    const raw = JSON.parse(fs.readFileSync(settingsPath, "utf8"));
+    return {
+      outputDir:
+        typeof raw.outputDir === "string" && raw.outputDir.trim()
+          ? raw.outputDir
+          : DEFAULT_OUTPUT_DIR,
+    };
+  } catch {
+    return { outputDir: DEFAULT_OUTPUT_DIR };
+  }
+};
+
+const writeSettings = (next: DabinkySettings) => {
+  ensureParentDir(settingsPath);
+  fs.writeFileSync(settingsPath, JSON.stringify(next, null, 2) + "\n");
+};
 const VIDEO_EXT = new Set([".mp4", ".mov", ".webm", ".mkv", ".m4v"]);
 
 // .dabinky bundle format. formatVersion is written into manifest.json; bump
@@ -312,6 +346,49 @@ function attachDabinkyMiddlewares(
           res.statusCode = 405;
           res.end("method not allowed");
         });
+
+        server.middlewares.use("/api/settings", (req, res) => {
+          if (req.method === "GET") {
+            res.setHeader("content-type", "application/json");
+            res.end(JSON.stringify(readSettings()));
+            return;
+          }
+          if (req.method === "POST") {
+            let body = "";
+            req.on("data", (chunk) => {
+              body += chunk;
+            });
+            req.on("end", () => {
+              try {
+                const parsed = JSON.parse(body) as { outputDir?: unknown };
+                if (
+                  typeof parsed.outputDir !== "string" ||
+                  !parsed.outputDir.trim()
+                ) {
+                  throw new Error("outputDir must be a non-empty string");
+                }
+                const next: DabinkySettings = {
+                  outputDir: path.resolve(parsed.outputDir),
+                };
+                writeSettings(next);
+                res.setHeader("content-type", "application/json");
+                res.end(JSON.stringify({ ok: true, settings: next }));
+              } catch (err) {
+                res.statusCode = 400;
+                res.end(
+                  JSON.stringify({
+                    ok: false,
+                    error: (err as Error).message,
+                  }),
+                );
+              }
+            });
+            return;
+          }
+          res.statusCode = 405;
+          res.end("method not allowed");
+        });
+
         // Export the current project (composition.json + referenced media)
         // as a streamed .dabinky ZIP. ZipPassThrough on MP4s skips deflate
         // (already-compressed payload, saves CPU for ~0 bytes), ZipDeflate on
@@ -981,16 +1058,17 @@ function attachDabinkyMiddlewares(
             filename
               .replace(/[^A-Za-z0-9._ -]/g, "_")
               .replace(/\.mp4$/i, "") + ".mp4";
-          const outputPath = path.join(outDir, safeName);
-          if (!outputPath.startsWith(outDir + path.sep)) {
+          const destDir = readSettings().outputDir;
+          const outputPath = path.join(destDir, safeName);
+          if (!outputPath.startsWith(destDir + path.sep)) {
             res.statusCode = 400;
             res.end(
               JSON.stringify({ ok: false, error: "invalid output path" }),
             );
             return;
           }
-          if (!fs.existsSync(outDir))
-            fs.mkdirSync(outDir, { recursive: true });
+          if (!fs.existsSync(destDir))
+            fs.mkdirSync(destDir, { recursive: true });
           const out = fs.createWriteStream(outputPath);
           req.pipe(out);
           out.on("finish", () => {
@@ -999,7 +1077,7 @@ function attachDabinkyMiddlewares(
             res.end(
               JSON.stringify({
                 ok: true,
-                path: `out/${safeName}`,
+                path: outputPath,
                 size: stat.size,
               }),
             );
@@ -1255,8 +1333,9 @@ function attachDabinkyMiddlewares(
               }
 
               emit({ type: "stage", stage: "concat" });
-              if (!fs.existsSync(outDir))
-                fs.mkdirSync(outDir, { recursive: true });
+              const destDir = readSettings().outputDir;
+              if (!fs.existsSync(destDir))
+                fs.mkdirSync(destDir, { recursive: true });
               const concatList = path.join(
                 chunksDir,
                 renderId,
@@ -1268,7 +1347,7 @@ function attachDabinkyMiddlewares(
                   `file '${path.join(chunksDir, renderId, `chunk-${i}.mp4`).replace(/'/g, "'\\''")}'`,
                 ).join("\n") + "\n",
               );
-              const outputPath = path.join(outDir, outputBasename);
+              const outputPath = path.join(destDir, outputBasename);
               await new Promise<void>((resolve, reject) => {
                 const ff = spawn(
                   ffmpegPath,
@@ -1325,7 +1404,7 @@ function attachDabinkyMiddlewares(
               const stat = fs.statSync(outputPath);
               emit({
                 type: "done",
-                outputPath: `out/${outputBasename}`,
+                outputPath,
                 size: stat.size,
               });
             } catch (err) {
@@ -1360,9 +1439,9 @@ function attachDabinkyMiddlewares(
             try {
               const { path: relPath } = JSON.parse(body) as { path?: string };
               if (!relPath) throw new Error("missing path");
-              const abs = path.resolve(dataRoot, relPath);
-              if (!abs.startsWith(outDir + path.sep))
-                throw new Error("only files under out/ can be revealed");
+              const abs = path.isAbsolute(relPath)
+                ? relPath
+                : path.resolve(dataRoot, relPath);
               if (!fs.existsSync(abs)) throw new Error("file not found");
               // macOS: -R reveals the file in Finder. On Linux/Windows this is
               // a no-op — we just open the directory.

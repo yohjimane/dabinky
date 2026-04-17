@@ -38,6 +38,7 @@ export const Timeline: React.FC<{
     durationSec: number,
   ) => void;
   onSplitSelectedClip: () => void;
+  onDeleteSelected: () => void;
 }> = ({
   state,
   update,
@@ -48,6 +49,7 @@ export const Timeline: React.FC<{
   onSelect,
   onDropAsset,
   onSplitSelectedClip,
+  onDeleteSelected,
 }) => {
   const [pxPerSec, setPxPerSec] = useState(24);
   const [dragOverTrack, setDragOverTrack] = useState<number | null>(null);
@@ -205,6 +207,11 @@ export const Timeline: React.FC<{
             );
           })()}
           onClick={onSplitSelectedClip}
+        />
+        <DeleteSelectionButton
+          enabled={selected !== null}
+          kind={selected?.kind ?? null}
+          onClick={onDeleteSelected}
         />
         <div style={{ flex: 1 }} />
         <span>Zoom</span>
@@ -478,6 +485,54 @@ const BladeButton: React.FC<{
       <line x1="8.12" y1="8.12" x2="12" y2="12" />
     </svg>
     Blade
+  </button>
+);
+
+const DeleteSelectionButton: React.FC<{
+  enabled: boolean;
+  kind: "clip" | "segment" | null;
+  onClick: () => void;
+}> = ({ enabled, kind, onClick }) => (
+  <button
+    onClick={onClick}
+    disabled={!enabled}
+    title={
+      enabled
+        ? `Delete selected ${kind === "segment" ? "caption" : "clip"}`
+        : "Select a clip or caption to delete"
+    }
+    style={{
+      display: "inline-flex",
+      alignItems: "center",
+      gap: 4,
+      background: enabled ? "#5c1f1f" : "transparent",
+      color: enabled ? "#ffd9d7" : "#4a4a52",
+      border: `1px solid ${enabled ? "#8a2b2b" : "#2e2e34"}`,
+      padding: "4px 9px",
+      borderRadius: 6,
+      cursor: enabled ? "pointer" : "not-allowed",
+      fontSize: 12,
+      fontWeight: 500,
+      lineHeight: 1,
+    }}
+  >
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <polyline points="3 6 5 6 21 6" />
+      <path d="M19 6l-2 14a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2L5 6" />
+      <path d="M10 11v6" />
+      <path d="M14 11v6" />
+      <path d="M9 6V4a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2" />
+    </svg>
+    Delete
   </button>
 );
 

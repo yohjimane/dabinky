@@ -107,8 +107,12 @@ const EditorInner: React.FC<{ initial: MyCompositionProps }> = ({
     const p = playerRef.current;
     if (!p) return;
     const frame = Math.max(0, Math.round(seconds * FPS));
-    p.seekTo(frame);
+    // Paint the playhead + selection synchronously so the click feels instant,
+    // then defer the video seek. Safari blocks the main thread when setting
+    // <video>.currentTime for HEVC on a large jump — running the seek off the
+    // click handler lets React paint before Safari decodes.
     setCurrentFrame(frame);
+    requestAnimationFrame(() => p.seekTo(frame));
   }, []);
 
   const save = useCallback(async () => {
@@ -825,8 +829,6 @@ const EditorInner: React.FC<{ initial: MyCompositionProps }> = ({
                 }
                 onRenameSrc={renameAsset}
                 onRenameError={flash}
-                onSplit={() => splitClip(ti, ci)}
-                onDelete={() => deleteClip(ti, ci)}
               />
             ))}
             {track.clips.length === 0 && <EmptyHint>No clips.</EmptyHint>}
@@ -885,7 +887,6 @@ const EditorInner: React.FC<{ initial: MyCompositionProps }> = ({
                 onChange={(patch, coalesce) =>
                   updateSegment(ti, si, patch, coalesce)
                 }
-                onDelete={() => deleteSegment(ti, si)}
               />
             ))}
             {track.segments.length === 0 && <EmptyHint>No segments.</EmptyHint>}
@@ -910,6 +911,14 @@ const EditorInner: React.FC<{ initial: MyCompositionProps }> = ({
           onSplitSelectedClip={() => {
             if (selected?.kind !== "clip") return;
             splitClip(selected.trackIndex, selected.itemIndex);
+          }}
+          onDeleteSelected={() => {
+            if (!selected) return;
+            if (selected.kind === "clip") {
+              deleteClip(selected.trackIndex, selected.itemIndex);
+            } else {
+              deleteSegment(selected.trackIndex, selected.itemIndex);
+            }
           }}
         />
       </div>
@@ -2080,8 +2089,6 @@ const ClipCard: React.FC<{
   onChange: (patch: Partial<Clip>, coalesce?: string) => void;
   onRenameSrc: (from: string, to: string) => Promise<string>;
   onRenameError: (msg: string) => void;
-  onSplit: () => void;
-  onDelete: () => void;
 }> = ({
   clip,
   cardId,
@@ -2090,8 +2097,6 @@ const ClipCard: React.FC<{
   onChange,
   onRenameSrc,
   onRenameError,
-  onSplit,
-  onDelete,
 }) => {
   const [srcDraft, setSrcDraft] = React.useState(clip.src);
   const [renaming, setRenaming] = React.useState(false);
@@ -2209,17 +2214,6 @@ const ClipCard: React.FC<{
         />
       </div>
     </div>
-    <div
-      onClick={(e) => e.stopPropagation()}
-      style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}
-    >
-      <button style={splitBtnStyle} onClick={onSplit}>
-        ✂ Split at playhead
-      </button>
-      <button style={deleteBtnStyle} onClick={onDelete}>
-        Delete
-      </button>
-    </div>
   </div>
   );
 };
@@ -2230,8 +2224,7 @@ const SegmentCard: React.FC<{
   selected: boolean;
   onSelect: () => void;
   onChange: (patch: Partial<TextSegment>, coalesce?: string) => void;
-  onDelete: () => void;
-}> = ({ segment, cardId, selected, onSelect, onChange, onDelete }) => (
+}> = ({ segment, cardId, selected, onSelect, onChange }) => (
   <div data-card-id={cardId} style={cardStyle(selected)} onClick={onSelect}>
     <div onClick={(e) => e.stopPropagation()}>
       <div style={labelStyle}>Text</div>
@@ -2308,14 +2301,6 @@ const SegmentCard: React.FC<{
           }}
         />
       </div>
-    </div>
-    <div
-      onClick={(e) => e.stopPropagation()}
-      style={{ display: "flex", justifyContent: "flex-end" }}
-    >
-      <button style={deleteBtnStyle} onClick={onDelete}>
-        Delete
-      </button>
     </div>
   </div>
 );

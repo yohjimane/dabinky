@@ -1153,6 +1153,7 @@ const runParallelRender = async (opts: {
   workers: number;
   codec: CodecChoice;
   bitrate: BitratePreset;
+  engine: Engine;
   signal: AbortSignal;
   setState: React.Dispatch<React.SetStateAction<RenderState>>;
   durationInFrames: number;
@@ -1164,13 +1165,13 @@ const runParallelRender = async (opts: {
     workers,
     codec,
     bitrate,
+    engine,
     signal,
     setState,
     durationInFrames,
     fps,
     startedAt,
   } = opts;
-  const engine = detectEngine();
   const res = await fetch("/api/parallel-render", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -1263,6 +1264,9 @@ const RenderButton: React.FC<{
   const [codec, setCodec] = React.useState<CodecChoice>("auto");
   const [bitrate, setBitrate] = React.useState<BitratePreset>("medium");
   const [workers, setWorkers] = React.useState<number>(1);
+  const [engineOverride, setEngineOverride] = React.useState<
+    "auto" | Engine
+  >("auto");
   const [codecSupport, setCodecSupport] = React.useState<Record<
     "av1" | "h265" | "h264",
     boolean
@@ -1313,11 +1317,14 @@ const RenderButton: React.FC<{
         // Chromium, which has different codec support from the editor tab
         // (which might be Safari with AV1), so they must probe for
         // themselves — the editor's probe isn't valid for them.
+        const engine: Engine =
+          engineOverride === "auto" ? detectEngine() : engineOverride;
         await runParallelRender({
           filename: safeName,
           workers,
           codec,
           bitrate,
+          engine,
           signal: controller.signal,
           setState,
           durationInFrames,
@@ -1452,11 +1459,12 @@ const RenderButton: React.FC<{
                     : ""}
                 </option>
                 {(["av1", "h265", "h264"] as const).map((c) => {
-                  const supported = codecSupport?.[c] ?? true;
+                  const probeSupported = codecSupport?.[c] ?? true;
+                  const disabled = workers === 1 && !probeSupported;
                   return (
-                    <option key={c} value={c} disabled={!supported}>
+                    <option key={c} value={c} disabled={disabled}>
                       {CODEC_LABELS[c]}
-                      {codecSupport && !supported ? " — unsupported" : ""}
+                      {disabled ? " — unsupported in this browser" : ""}
                     </option>
                   );
                 })}
@@ -1499,21 +1507,46 @@ const RenderButton: React.FC<{
                 ))}
               </select>
               {workers > 1 && (
-                <div
-                  style={{
-                    marginTop: 4,
-                    color: "#c9a94b",
-                    fontSize: 11,
-                    lineHeight: 1.4,
-                  }}
-                >
-                  Spawns {workers} headless Playwright{" "}
-                  {detectEngine() === "webkit" ? "WebKit" : "Chromium"}{" "}
-                  processes (matched to this tab's engine), concats with
-                  ffmpeg. Detected{" "}
-                  {navigator.hardwareConcurrency ?? "?"} logical cores —
-                  try larger values if CPU is under-utilized.
-                </div>
+                <>
+                  <div style={{ ...labelStyle, marginTop: 8 }}>
+                    Engine
+                  </div>
+                  <select
+                    style={{ ...inputStyle, cursor: "pointer" }}
+                    value={engineOverride}
+                    onChange={(e) =>
+                      setEngineOverride(
+                        e.target.value as "auto" | Engine,
+                      )
+                    }
+                  >
+                    <option value="auto">
+                      Auto — match this tab ({detectEngine()})
+                    </option>
+                    <option value="chromium">Chromium</option>
+                    <option value="webkit">
+                      WebKit (hardware AV1 on M3+)
+                    </option>
+                  </select>
+                  <div
+                    style={{
+                      marginTop: 4,
+                      color: "#c9a94b",
+                      fontSize: 11,
+                      lineHeight: 1.4,
+                    }}
+                  >
+                    Spawns {workers} headless Playwright{" "}
+                    {(engineOverride === "auto"
+                      ? detectEngine()
+                      : engineOverride) === "webkit"
+                      ? "WebKit"
+                      : "Chromium"}{" "}
+                    processes, concats with ffmpeg. Detected{" "}
+                    {navigator.hardwareConcurrency ?? "?"} logical cores —
+                    try larger values if CPU is under-utilized.
+                  </div>
+                </>
               )}
               <div style={{ display: "flex", gap: 6, marginTop: 12 }}>
                 <button style={splitBtnStyle} onClick={() => setOpen(false)}>

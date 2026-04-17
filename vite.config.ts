@@ -14,16 +14,44 @@ import {
   type UnzipFile,
 } from "fflate";
 import { z } from "zod";
+import ffmpegStaticPath from "ffmpeg-static";
+
+// In a packaged Electron app, ffmpeg-static's path points inside app.asar,
+// but the binary itself is extracted next to asar via electron-builder's
+// asarUnpack rule. Swap the path at runtime so spawn() hits the unpacked copy.
+const ffmpegPath = (() => {
+  if (!ffmpegStaticPath) return "ffmpeg";
+  return ffmpegStaticPath.includes(`${path.sep}app.asar${path.sep}`)
+    ? ffmpegStaticPath.replace(
+        `${path.sep}app.asar${path.sep}`,
+        `${path.sep}app.asar.unpacked${path.sep}`,
+      )
+    : ffmpegStaticPath;
+})();
 
 const repoRoot = path.resolve(__dirname);
-const jsonPath = path.join(repoRoot, "src/data/composition.json");
+// In a packaged Electron build, Electron sets DABINKY_DATA_ROOT to a writable
+// directory (app.getPath("userData")) and all user data lives there. In dev it
+// stays unset and we use the legacy repo-relative paths so existing devs don't
+// have to migrate anything.
+const usingExternalDataRoot = Boolean(process.env.DABINKY_DATA_ROOT);
+const dataRoot = usingExternalDataRoot
+  ? path.resolve(process.env.DABINKY_DATA_ROOT as string)
+  : repoRoot;
+const jsonPath = usingExternalDataRoot
+  ? path.join(dataRoot, "composition.json")
+  : path.join(repoRoot, "src/data/composition.json");
 const defaultJsonPath = path.join(
   repoRoot,
   "src/data/composition.default.json",
 );
 const publicDir = path.join(repoRoot, "public");
-const mediaDir = path.join(publicDir, "media");
-const outDir = path.join(repoRoot, "out");
+const mediaDir = usingExternalDataRoot
+  ? path.join(dataRoot, "media")
+  : path.join(publicDir, "media");
+const outDir = usingExternalDataRoot
+  ? path.join(dataRoot, "out")
+  : path.join(repoRoot, "out");
 // Per-render temporary directory for intermediate chunk files produced by the
 // parallel-render pipeline. Cleaned up after each successful concat.
 const chunksDir = path.join(outDir, ".chunks");
@@ -123,10 +151,24 @@ const ensureMediaDir = () => {
   }
 };
 
+const ensureParentDir = (p: string) => {
+  const parent = path.dirname(p);
+  if (!fs.existsSync(parent)) {
+    fs.mkdirSync(parent, { recursive: true });
+  }
+};
+
 // Resolve a clip's src (like "media/foo.mp4" or legacy "foo.mp4") to its
-// absolute filesystem path, staying inside publicDir.
+// absolute filesystem path. media/* routes to mediaDir (which may live outside
+// publicDir in packaged mode); anything else stays under publicDir.
 const resolveAssetPath = (relName: string): string | null => {
   const normalized = relName.replace(/^\/+/, "");
+  if (normalized.startsWith("media/")) {
+    const sub = normalized.slice("media/".length);
+    const abs = path.join(mediaDir, sub);
+    if (!abs.startsWith(mediaDir + path.sep) && abs !== mediaDir) return null;
+    return abs;
+  }
   const abs = path.join(publicDir, normalized);
   if (!abs.startsWith(publicDir + path.sep) && abs !== publicDir) return null;
   return abs;
@@ -146,11 +188,27 @@ export default defineConfig({
       "@src": path.join(repoRoot, "src"),
     },
   },
+  build: {
+    rollupOptions: {
+      input: {
+        index: path.join(repoRoot, "editor/index.html"),
+        chunkRender: path.join(repoRoot, "editor/chunk-render.html"),
+      },
+    },
+  },
   plugins: [
     react(),
     {
       name: "composition-json-api",
-      configureServer(server) {
+      configureServer: attachDabinkyMiddlewares,
+      configurePreviewServer: attachDabinkyMiddlewares,
+    },
+  ],
+});
+
+function attachDabinkyMiddlewares(
+  server: import("vite").ViteDevServer | import("vite").PreviewServer,
+) {
         // Serve /media/* directly from disk. Vite's built-in public middleware
         // caches the public dir file list and updates it async via a file
         // watcher, so immediately after /api/rename there's a window where
@@ -216,6 +274,7 @@ export default defineConfig({
         server.middlewares.use("/api/composition", (req, res) => {
           if (req.method === "GET") {
             if (!fs.existsSync(jsonPath) && fs.existsSync(defaultJsonPath)) {
+              ensureParentDir(jsonPath);
               fs.copyFileSync(defaultJsonPath, jsonPath);
             }
             const raw = fs.readFileSync(jsonPath, "utf8");
@@ -231,6 +290,7 @@ export default defineConfig({
             req.on("end", () => {
               try {
                 const parsed = JSON.parse(body);
+                ensureParentDir(jsonPath);
                 fs.writeFileSync(
                   jsonPath,
                   JSON.stringify(parsed, null, 2) + "\n",
@@ -702,6 +762,7 @@ export default defineConfig({
             }
 
             try {
+              ensureParentDir(jsonPath);
               fs.writeFileSync(
                 jsonPath,
                 JSON.stringify(composition, null, 2) + "\n",
@@ -816,14 +877,22 @@ export default defineConfig({
                 throw new Error(
                   `target must keep a video extension: ${toExt || "(none)"}`,
                 );
+              // mediaDir may live outside publicDir in packaged mode, so
+              // figure out which bucket the source lives in and anchor the
+              // target-path guard against that bucket.
+              const isInMedia = fromAbs.startsWith(mediaDir + path.sep);
+              const baseDir = isInMedia ? mediaDir : publicDir;
               const toAbs = path.join(fromDir, toBase);
-              if (!toAbs.startsWith(publicDir + path.sep))
+              if (!toAbs.startsWith(baseDir + path.sep))
                 throw new Error("invalid target path");
               if (fromAbs !== toAbs && fs.existsSync(toAbs))
                 throw new Error(`target already exists: ${toBase}`);
               if (fromAbs !== toAbs) fs.renameSync(fromAbs, toAbs);
-              // Return path using the same directory as from (relative to public/)
-              const relFromDir = path.relative(publicDir, fromDir);
+              // Preserve the "media/" prefix convention when renaming a media
+              // asset; for loose files in publicDir use their relative dir.
+              const relFromDir = isInMedia
+                ? "media"
+                : path.relative(publicDir, fromDir);
               const toRel = relFromDir ? `${relFromDir}/${toBase}` : toBase;
               res.setHeader("content-type", "application/json");
               res.end(JSON.stringify({ ok: true, from, to: toRel }));
@@ -1202,7 +1271,7 @@ export default defineConfig({
               const outputPath = path.join(outDir, outputBasename);
               await new Promise<void>((resolve, reject) => {
                 const ff = spawn(
-                  "ffmpeg",
+                  ffmpegPath,
                   [
                     "-y",
                     "-f",
@@ -1316,7 +1385,4 @@ export default defineConfig({
             }
           });
         });
-      },
-    },
-  ],
-});
+}

@@ -1,5 +1,7 @@
 node_modules
 dist
+editor/dist
+pw-browsers
 .DS_Store
 .env
 

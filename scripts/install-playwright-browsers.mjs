@@ -14,7 +14,7 @@ const env = {
 const result = spawnSync(
   "npx",
   ["playwright", "install", "chromium", "webkit"],
-  { cwd: repoRoot, env, stdio: "inherit" },
+  { cwd: repoRoot, env, stdio: "inherit", shell: true },
 );
 
 if (result.status !== 0) {

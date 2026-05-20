@@ -1257,6 +1257,7 @@ const runSingleRender = async (opts: {
     muted: true,
     hardwareAcceleration: "prefer-hardware",
     outputTarget: "arraybuffer",
+    timeoutInMilliseconds: 120000,
     signal,
     onProgress: (p) => {
       setState({

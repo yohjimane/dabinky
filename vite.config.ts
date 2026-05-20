@@ -237,6 +237,59 @@ process.on("SIGTERM", () => {
   process.exit(143);
 });
 
+const HEVC_CODECS = new Set(["hevc", "h265"]);
+
+const probeVideoCodec = (filePath: string): Promise<string> =>
+  new Promise((resolve) => {
+    const probe = spawn(ffmpegPath, ["-i", filePath], {
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+    let stderr = "";
+    probe.stderr.on("data", (c: Buffer) => {
+      stderr += c.toString();
+    });
+    probe.on("close", () => {
+      const m = /Video:\s+(\w+)/.exec(stderr);
+      resolve(m?.[1]?.toLowerCase() ?? "unknown");
+    });
+    probe.on("error", () => resolve("unknown"));
+  });
+
+const transcodeToH264 = (input: string, output: string): Promise<void> =>
+  new Promise((resolve, reject) => {
+    const ff = spawn(
+      ffmpegPath,
+      [
+        "-y",
+        "-i",
+        input,
+        "-c:v",
+        "libx264",
+        "-crf",
+        "18",
+        "-preset",
+        "medium",
+        "-pix_fmt",
+        "yuv420p",
+        "-an",
+        "-movflags",
+        "+faststart",
+        output,
+      ],
+      { stdio: ["ignore", "ignore", "pipe"] },
+    );
+    activeFfmpegs.add(ff);
+    ff.on("close", (code) => {
+      activeFfmpegs.delete(ff);
+      if (code === 0) resolve();
+      else reject(new Error(`ffmpeg transcode exited with code ${code}`));
+    });
+    ff.on("error", (err) => {
+      activeFfmpegs.delete(ff);
+      reject(err);
+    });
+  });
+
 // Standalone static media server for parallel render workers. Bypasses Vite's
 // middleware stack: 6 Playwright workers pulling 100–200MB source files in
 // parallel saturate Vite's single-threaded connect chain, so we give them a
@@ -1046,13 +1099,55 @@ function attachDabinkyMiddlewares(
             );
             return;
           }
-          const out = fs.createWriteStream(dest);
+          const tempPath = path.join(
+            mediaDir,
+            `._upload_${Date.now()}_${base}`,
+          );
+          const out = fs.createWriteStream(tempPath);
           req.pipe(out);
-          out.on("finish", () => {
-            res.setHeader("content-type", "application/json");
-            res.end(JSON.stringify({ ok: true, name: `media/${base}` }));
+          out.on("finish", async () => {
+            try {
+              const codec = await probeVideoCodec(tempPath);
+              if (HEVC_CODECS.has(codec)) {
+                const outBase =
+                  base.replace(/\.[^.]+$/, "") + ".mp4";
+                const finalPath = path.join(mediaDir, outBase);
+                await transcodeToH264(tempPath, finalPath);
+                try {
+                  fs.unlinkSync(tempPath);
+                } catch {}
+                res.setHeader("content-type", "application/json");
+                res.end(
+                  JSON.stringify({
+                    ok: true,
+                    name: `media/${outBase}`,
+                    transcoded: true,
+                  }),
+                );
+              } else {
+                fs.renameSync(tempPath, dest);
+                res.setHeader("content-type", "application/json");
+                res.end(
+                  JSON.stringify({ ok: true, name: `media/${base}` }),
+                );
+              }
+            } catch (err) {
+              try {
+                fs.unlinkSync(tempPath);
+              } catch {}
+              res.statusCode = 500;
+              res.end(
+                JSON.stringify({
+                  ok: false,
+                  error: (err as Error).message,
+                }),
+              );
+            }
           });
           out.on("error", (err) => {
+            try {
+              fs.unlinkSync(tempPath);
+            } catch {}
             res.statusCode = 500;
             res.end(JSON.stringify({ ok: false, error: err.message }));
           });

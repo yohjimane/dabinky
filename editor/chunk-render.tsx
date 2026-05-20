@@ -144,6 +144,7 @@ const main = async () => {
     muted: true,
     hardwareAcceleration,
     outputTarget: "arraybuffer",
+    timeoutInMilliseconds: 120000,
     frameRange: [firstFrame, lastFrame],
     onProgress: (p) => {
       setStatus(

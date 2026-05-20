@@ -98,7 +98,10 @@
       "artifactName": "${productName}.${ext}"
     },
     "win": {
-      "target": ["portable"],
+      "target": {
+        "target": "portable",
+        "arch": ["x64"]
+      },
       "icon": "build/icon.ico"
     },
     "portable": {

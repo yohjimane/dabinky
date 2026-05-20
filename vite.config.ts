@@ -1165,8 +1165,26 @@ function attachDabinkyMiddlewares(
             );
           }
         });
-        // Save a client-side render: accepts the MP4 body streamed from the
-        // browser (produced by @remotion/web-renderer) and writes it to out/.
+        server.middlewares.use("/api/clear-media", (req, res) => {
+          if (req.method !== "POST") {
+            res.statusCode = 405;
+            res.end("method not allowed");
+            return;
+          }
+          try {
+            if (fs.existsSync(mediaDir)) {
+              for (const entry of fs.readdirSync(mediaDir)) {
+                fs.rmSync(path.join(mediaDir, entry), { recursive: true, force: true });
+              }
+            }
+            res.setHeader("content-type", "application/json");
+            res.end(JSON.stringify({ ok: true }));
+          } catch (err) {
+            res.statusCode = 500;
+            res.end(JSON.stringify({ ok: false, error: (err as Error).message }));
+          }
+        });
+
         server.middlewares.use("/api/save-render", (req, res) => {
           if (req.method !== "POST") {
             res.statusCode = 405;

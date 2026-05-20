@@ -688,6 +688,42 @@ const EditorInner: React.FC<{ initial: MyCompositionProps }> = ({
           }}
         >
           <strong style={{ marginRight: "auto" }}>Editor</strong>
+          <IconButton
+            onClick={async () => {
+              if (!confirm("Start a new project? This will clear the timeline and media pool.")) return;
+              const name = prompt("Project name:");
+              if (!name) return;
+              const blank: MyCompositionProps = {
+                fadeDuration: 0.5,
+                fontSize: 32,
+                textColor: "#ffffff",
+                bgColor: "rgba(0, 0, 0, 0.7)",
+                bgBorderRadius: 12,
+                paddingBottom: 50,
+                videoTracks: [{ id: newTrackId("v"), name: "V1", clips: [] }],
+                textTracks: [{ id: newTrackId("t"), name: "T1", segments: [] }],
+              };
+              await fetch("/api/clear-media", { method: "POST" });
+              const res = await fetch("/api/composition", {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify(blank),
+              });
+              if (!(await res.json()).ok) {
+                setSaveMsg("Error creating project");
+                return;
+              }
+              reset(blank);
+              setSavedSnapshot(blank);
+              setSelected(null);
+              setCurrentFrame(0);
+              setAssetRefreshKey((k) => k + 1);
+              setSaveMsg(`New project: ${name}`);
+            }}
+            title="Clear timeline and start fresh"
+          >
+            ✦ New
+          </IconButton>
           <IconButton disabled={!canUndo} onClick={undo} title="Undo (⌘Z)">
             ↶ Undo
           </IconButton>

@@ -43,6 +43,9 @@
     "build": "node scripts/init-composition.mjs && remotion bundle",
     "editor-build": "vite build",
     "dist": "vite build && electron-builder --mac --arm64",
+    "dist:mac": "vite build && electron-builder --mac --arm64",
+    "dist:win": "vite build && electron-builder --win --x64",
+    "dist:all": "vite build && electron-builder --mac --arm64 --win --x64",
     "upgrade": "remotion upgrade",
     "lint": "eslint src && tsc"
   },
@@ -89,6 +92,15 @@
     },
     "dmg": {
       "artifactName": "${productName}.${ext}"
+    },
+    "win": {
+      "target": ["nsis"],
+      "icon": "build/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "artifactName": "${productName}-Setup.${ext}"
     }
   }
 }

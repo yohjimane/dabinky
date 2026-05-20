@@ -1467,10 +1467,11 @@ function attachDabinkyMiddlewares(
                     ]
                   : [
                       "--use-angle=d3d11",
-                      "--enable-features=UseSkiaRenderer,CanvasOopRasterization",
+                      "--enable-features=Vulkan,UseSkiaRenderer,CanvasOopRasterization",
                       "--ignore-gpu-blocklist",
                       "--enable-gpu-rasterization",
                       "--enable-zero-copy",
+                      "--disable-gpu-driver-bug-workarounds",
                     ];
               const browsers = await Promise.all(
                 Array.from({ length: workers }, () =>

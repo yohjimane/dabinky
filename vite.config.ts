@@ -1444,7 +1444,10 @@ function attachDabinkyMiddlewares(
               // webkit based on the engine the editor tab is running in:
               // Chromium gives fast HEVC parallel, WebKit gives AV1 parallel
               // (M3+ has hardware AV1 encoder).
-              const engine = parsed.engine === "webkit" ? "webkit" : "chromium";
+              const engine =
+                parsed.engine === "webkit" && process.platform === "darwin"
+                  ? "webkit"
+                  : "chromium";
               emit({ type: "stage", stage: "starting-browsers", engine });
               const playwright = await import("playwright");
               const launcher = engine === "webkit" ? playwright.webkit : playwright.chromium;
@@ -1452,14 +1455,23 @@ function attachDabinkyMiddlewares(
               // probes fall back to software encoding. New-headless + explicit
               // GPU flags let VideoToolbox-backed encoders light up. WebKit
               // ignores these and uses its own GPU path.
-              const chromiumGpuArgs = [
-                "--use-angle=metal",
-                "--enable-features=Vulkan,UseSkiaRenderer,CanvasOopRasterization",
-                "--ignore-gpu-blocklist",
-                "--enable-gpu-rasterization",
-                "--enable-zero-copy",
-                "--disable-gpu-driver-bug-workarounds",
-              ];
+              const chromiumGpuArgs =
+                process.platform === "darwin"
+                  ? [
+                      "--use-angle=metal",
+                      "--enable-features=Vulkan,UseSkiaRenderer,CanvasOopRasterization",
+                      "--ignore-gpu-blocklist",
+                      "--enable-gpu-rasterization",
+                      "--enable-zero-copy",
+                      "--disable-gpu-driver-bug-workarounds",
+                    ]
+                  : [
+                      "--use-angle=d3d11",
+                      "--enable-features=UseSkiaRenderer,CanvasOopRasterization",
+                      "--ignore-gpu-blocklist",
+                      "--enable-gpu-rasterization",
+                      "--enable-zero-copy",
+                    ];
               const browsers = await Promise.all(
                 Array.from({ length: workers }, () =>
                   launcher.launch(

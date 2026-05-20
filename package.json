@@ -59,10 +59,7 @@
   "build": {
     "appId": "com.dabinky.app",
     "productName": "Dabinky",
-    "asar": true,
-    "asarUnpack": [
-      "node_modules/ffmpeg-static/**"
-    ],
+    "asar": false,
     "extraResources": [
       {
         "from": "pw-browsers",

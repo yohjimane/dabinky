@@ -202,7 +202,12 @@ export const MyComposition: React.FC<MyCompositionProps> = ({
                   fadeOutSec={clip.fadeOut ?? 0}
                 >
                   <Video
-                    src={staticFile(clip.src)}
+                    src={
+                      clip.src.startsWith("http://") ||
+                      clip.src.startsWith("https://")
+                        ? clip.src
+                        : staticFile(clip.src)
+                    }
                     trimBefore={trimBefore}
                     trimAfter={trimAfter}
                     muted

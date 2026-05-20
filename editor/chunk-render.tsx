@@ -5,6 +5,8 @@
 //   2. computes its chunk's frame range
 //   3. calls renderMediaOnWeb for that range
 //   4. POSTs the resulting blob to /api/save-chunk so the orchestrator sees it
+// Media requests to /media/** are rewritten by Playwright page.route() to
+// the standalone media server on MEDIA_SERVER_PORT — see vite.config.ts.
 import { MyComposition } from "@src/Composition";
 import type { MyCompositionProps } from "@src/Composition";
 
@@ -89,12 +91,29 @@ const main = async () => {
   const codec: CodecChoice =
     requestedCodec === "auto" ? probed.codec : requestedCodec;
   const hardwareAcceleration = probed.hardwareAcceleration;
+  console.log(
+    `[chunk ${chunkIndex}] codec=${codec} hwaccel=${hardwareAcceleration}`,
+  );
 
   setStatus(`Chunk ${chunkIndex + 1}/${totalChunks} — loading composition…`);
   const inputProps = (await fetch("/api/composition").then((r) =>
     r.json(),
   )) as MyCompositionProps;
   const totalFrames = computeTotalFrames(inputProps);
+
+  // Route every video clip through the standalone media server (see
+  // vite.config.ts ensureMediaServer). Vite's connect middleware stack
+  // serializes behind a single event loop and throttles parallel range
+  // requests across workers; the standalone server only does file
+  // streaming, so bypassing Vite gives ~2x render throughput.
+  const MEDIA_BASE = "http://127.0.0.1:5181";
+  for (const track of inputProps.videoTracks) {
+    for (const clip of track.clips) {
+      if (!clip.src.startsWith("http")) {
+        clip.src = `${MEDIA_BASE}/${clip.src.replace(/^\/+/, "")}`;
+      }
+    }
+  }
 
   // Evenly split frames across chunks. Each chunk is a standalone render
   // that starts on its own keyframe, so no boundary-frame deduplication is
@@ -142,6 +161,9 @@ const main = async () => {
   });
 
   const blob = await result.getBlob();
+  console.log(
+    `[chunk ${chunkIndex}] done frames=${chunkFrameCount} blobBytes=${blob.size}`,
+  );
   setStatus(`Chunk ${chunkIndex + 1}/${totalChunks} — uploading ${Math.round(blob.size / 1024)} KB`);
 
   const saveRes = await fetch(

@@ -976,6 +976,7 @@ type RenderState =
       chunkProgress?: number[];
     }
   | { kind: "saving"; startedAt: number }
+  | { kind: "compressing"; startedAt: number; progress: number }
   | { kind: "done"; outputPath: string; stats: RenderStats }
   | { kind: "error"; message: string };
 
@@ -1195,8 +1196,22 @@ const runParallelRender = async (opts: {
       try {
         const ev = JSON.parse(line);
         if (ev.type === "stage") {
-          // Stage transitions don't update progress; they'll be reflected
-          // indirectly by the next progress event or the final done.
+          // The compress stage runs after all chunks are uploaded and
+          // can take minutes on its own (libsvtav1 transcode). Swap the
+          // UI out of "rendering 100%" so the user sees what's happening.
+          if (ev.stage === "compressing") {
+            setState({
+              kind: "compressing",
+              startedAt: Date.now(),
+              progress: 0,
+            });
+          }
+        } else if (ev.type === "compress-progress") {
+          const p =
+            typeof ev.progress === "number" ? ev.progress : 0;
+          setState((prev) =>
+            prev.kind === "compressing" ? { ...prev, progress: p } : prev,
+          );
         } else if (ev.type === "progress") {
           if (
             typeof ev.chunk === "number" &&
@@ -1321,7 +1336,8 @@ const RenderButton: React.FC<{
   const running =
     state.kind === "preparing" ||
     state.kind === "rendering" ||
-    state.kind === "saving";
+    state.kind === "saving" ||
+    state.kind === "compressing";
 
   React.useEffect(() => {
     if (!open) return;
@@ -1639,7 +1655,8 @@ const RenderButton: React.FC<{
           )}
           {(state.kind === "preparing" ||
             state.kind === "rendering" ||
-            state.kind === "saving") && (
+            state.kind === "saving" ||
+            state.kind === "compressing") && (
             <RenderProgress state={state} onCancel={cancelRender} />
           )}
           {state.kind === "done" && (
@@ -1763,7 +1780,10 @@ const formatDuration = (sec: number): string => {
 const RenderProgress: React.FC<{
   state: Extract<
     RenderState,
-    { kind: "preparing" } | { kind: "rendering" } | { kind: "saving" }
+    | { kind: "preparing" }
+    | { kind: "rendering" }
+    | { kind: "saving" }
+    | { kind: "compressing" }
   >;
   onCancel: () => void;
 }> = ({ state, onCancel }) => {
@@ -1820,6 +1840,33 @@ const RenderProgress: React.FC<{
       <div>
         <div style={{ marginBottom: 6 }}>Saving to disk…</div>
         {bar(1, "#4a6aa8")}
+      </div>
+    );
+  }
+  if (state.kind === "compressing") {
+    const elapsed = (Date.now() - state.startedAt) / 1000;
+    const p = state.progress;
+    const etaSec = p > 0.01 ? elapsed / p - elapsed : Infinity;
+    return (
+      <div>
+        <div style={{ marginBottom: 6 }}>
+          Re-encoding with libsvtav1 ({Math.round(p * 100)}%)
+        </div>
+        {bar(p, "#4a6aa8")}
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            marginTop: 6,
+            color: "#8b8b94",
+            fontSize: 11,
+            fontVariantNumeric: "tabular-nums",
+          }}
+        >
+          <span>Elapsed {formatDuration(elapsed)}</span>
+          <span>ETA {formatDuration(etaSec)}</span>
+        </div>
+        {cancelRow}
       </div>
     );
   }

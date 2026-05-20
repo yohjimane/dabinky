@@ -4,7 +4,8 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
-import { spawn } from "node:child_process";
+import { spawn, execSync } from "node:child_process";
+import http from "node:http";
 import {
   Zip,
   ZipDeflate,
@@ -208,6 +209,141 @@ const resolveAssetPath = (relName: string): string | null => {
   return abs;
 };
 
+// Track every ffmpeg child we spawn so the process can SIGKILL them on
+// exit. Without this, a running libsvtav1 encode outlives the Electron /
+// Vite parent (Node doesn't propagate shutdown to children) and pins the
+// user's CPU until they manually killall. Added when spawned, removed on
+// close.
+const activeFfmpegs = new Set<ReturnType<typeof spawn>>();
+const killAllFfmpegs = () => {
+  for (const ff of activeFfmpegs) {
+    if (ff.exitCode === null) {
+      try {
+        ff.kill("SIGKILL");
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+  activeFfmpegs.clear();
+};
+process.on("exit", killAllFfmpegs);
+process.on("SIGINT", () => {
+  killAllFfmpegs();
+  process.exit(130);
+});
+process.on("SIGTERM", () => {
+  killAllFfmpegs();
+  process.exit(143);
+});
+
+// Standalone static media server for parallel render workers. Bypasses Vite's
+// middleware stack: 6 Playwright workers pulling 100–200MB source files in
+// parallel saturate Vite's single-threaded connect chain, so we give them a
+// dedicated origin that only does range-aware file streaming.
+export const MEDIA_SERVER_PORT = 5181;
+let mediaServerStarted = false;
+const ensureMediaServer = () => {
+  if (mediaServerStarted) return;
+  mediaServerStarted = true;
+  const server = http.createServer((req, res) => {
+    res.setHeader("access-control-allow-origin", "*");
+    res.setHeader("access-control-allow-methods", "GET, HEAD, OPTIONS");
+    res.setHeader(
+      "access-control-allow-headers",
+      "range, content-type, accept",
+    );
+    res.setHeader("access-control-max-age", "86400");
+    res.setHeader(
+      "access-control-expose-headers",
+      "content-range, accept-ranges, content-length, content-type",
+    );
+    if (req.method === "OPTIONS") {
+      res.statusCode = 204;
+      return res.end();
+    }
+    if (req.method !== "GET" && req.method !== "HEAD") {
+      res.statusCode = 405;
+      return res.end();
+    }
+    const rawUrl = (req.url ?? "/").split("?")[0].split("#")[0];
+    let rel: string;
+    try {
+      rel = decodeURI(rawUrl).replace(/^\/+/, "");
+    } catch {
+      res.statusCode = 400;
+      return res.end();
+    }
+    if (!rel.startsWith("media/")) {
+      res.statusCode = 404;
+      return res.end();
+    }
+    const abs = path.join(mediaDir, rel.slice("media/".length));
+    if (!abs.startsWith(mediaDir + path.sep)) {
+      res.statusCode = 403;
+      return res.end();
+    }
+    let stat: fs.Stats;
+    try {
+      stat = fs.statSync(abs);
+    } catch {
+      res.statusCode = 404;
+      return res.end();
+    }
+    if (!stat.isFile()) {
+      res.statusCode = 404;
+      return res.end();
+    }
+    const ext = path.extname(abs).toLowerCase();
+    res.setHeader(
+      "content-type",
+      MIME_BY_EXT[ext] ?? "application/octet-stream",
+    );
+    res.setHeader("accept-ranges", "bytes");
+    res.setHeader("cache-control", "no-cache");
+    const range = req.headers.range;
+    if (range) {
+      const m = /^bytes=(\d*)-(\d*)$/.exec(range);
+      if (m) {
+        const start = m[1] ? parseInt(m[1], 10) : 0;
+        const end = m[2] ? parseInt(m[2], 10) : stat.size - 1;
+        if (
+          Number.isNaN(start) ||
+          Number.isNaN(end) ||
+          start > end ||
+          end >= stat.size
+        ) {
+          res.statusCode = 416;
+          res.setHeader("content-range", `bytes */${stat.size}`);
+          return res.end();
+        }
+        res.statusCode = 206;
+        res.setHeader(
+          "content-range",
+          `bytes ${start}-${end}/${stat.size}`,
+        );
+        res.setHeader("content-length", String(end - start + 1));
+        if (req.method === "HEAD") return res.end();
+        fs.createReadStream(abs, { start, end }).pipe(res);
+        return;
+      }
+    }
+    res.statusCode = 200;
+    res.setHeader("content-length", String(stat.size));
+    if (req.method === "HEAD") return res.end();
+    fs.createReadStream(abs).pipe(res);
+  });
+  server.on("error", (err) => {
+    // EADDRINUSE is the common case on dev restarts — surface it clearly
+    // rather than crashing the Vite process.
+    console.error(
+      `[dabinky] media server failed on :${MEDIA_SERVER_PORT}: ${(err as Error).message}`,
+    );
+    mediaServerStarted = false;
+  });
+  server.listen(MEDIA_SERVER_PORT, "127.0.0.1");
+};
+
 export default defineConfig({
   root: path.join(repoRoot, "editor"),
   publicDir: path.join(repoRoot, "public"),
@@ -243,6 +379,7 @@ export default defineConfig({
 function attachDabinkyMiddlewares(
   server: import("vite").ViteDevServer | import("vite").PreviewServer,
 ) {
+        ensureMediaServer();
         // Serve /media/* directly from disk. Vite's built-in public middleware
         // caches the public dir file list and updates it async via a file
         // watcher, so immediately after /api/rename there's a window where
@@ -1217,6 +1354,11 @@ function attachDabinkyMiddlewares(
             // disconnect handler can tear them down if the client bails.
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             let browsersRef: Array<any> = [];
+            // ffmpeg child for the concat/re-encode step. Tracked so the
+            // disconnect handler can SIGKILL it — libsvtav1 encodes can
+            // run for minutes and otherwise survive the editor closing,
+            // pinning the user's CPU.
+            let activeFfmpeg: ReturnType<typeof spawn> | null = null;
             // Fires when the editor tab aborts its fetch (e.g. user hit
             // Cancel, or navigated away). Without this the chunk promises
             // below hang forever and Playwright browsers keep burning CPU.
@@ -1233,6 +1375,13 @@ function attachDabinkyMiddlewares(
               // resolves or rejects — this is the first line of defence.
               for (const b of browsersRef) {
                 void b.close().catch(() => {});
+              }
+              if (activeFfmpeg && activeFfmpeg.exitCode === null) {
+                try {
+                  activeFfmpeg.kill("SIGKILL");
+                } catch {
+                  /* ignore */
+                }
               }
             });
             try {
@@ -1281,9 +1430,25 @@ function attachDabinkyMiddlewares(
               emit({ type: "stage", stage: "starting-browsers", engine });
               const playwright = await import("playwright");
               const launcher = engine === "webkit" ? playwright.webkit : playwright.chromium;
+              // Old headless Chromium ships with GPU disabled, so WebCodecs
+              // probes fall back to software encoding. New-headless + explicit
+              // GPU flags let VideoToolbox-backed encoders light up. WebKit
+              // ignores these and uses its own GPU path.
+              const chromiumGpuArgs = [
+                "--use-angle=metal",
+                "--enable-features=Vulkan,UseSkiaRenderer,CanvasOopRasterization",
+                "--ignore-gpu-blocklist",
+                "--enable-gpu-rasterization",
+                "--enable-zero-copy",
+                "--disable-gpu-driver-bug-workarounds",
+              ];
               const browsers = await Promise.all(
                 Array.from({ length: workers }, () =>
-                  launcher.launch({ headless: true }),
+                  launcher.launch(
+                    engine === "chromium"
+                      ? { headless: true, args: chromiumGpuArgs }
+                      : { headless: true },
+                  ),
                 ),
               );
               browsersRef = browsers;
@@ -1303,6 +1468,22 @@ function attachDabinkyMiddlewares(
                   browsers.map(async (browser, i) => {
                     const ctx = await browser.newContext();
                     const page = await ctx.newPage();
+                    page.on("console", (msg) => {
+                      const text = msg.text();
+                      if (text.startsWith("[chunk ")) {
+                        console.log(`[parallel-render] ${text}`);
+                      }
+                    });
+                    page.on("pageerror", (err) => {
+                      console.log(
+                        `[parallel-render][chunk ${i}][pageerror] ${err.message}`,
+                      );
+                    });
+                    // Media srcs are rewritten to the standalone media
+                    // server in chunk-render.tsx before render. No
+                    // page.route here — interception on a page with large
+                    // POST uploads (save-chunk) drops bytes in some
+                    // Playwright builds, producing 0-byte chunk files.
                     const u = new URL(
                       "http://localhost:5180/chunk-render.html",
                     );
@@ -1348,27 +1529,154 @@ function attachDabinkyMiddlewares(
                 ).join("\n") + "\n",
               );
               const outputPath = path.join(destDir, outputBasename);
-              await new Promise<void>((resolve, reject) => {
-                const ff = spawn(
-                  ffmpegPath,
-                  [
-                    "-y",
-                    "-f",
-                    "concat",
-                    "-safe",
-                    "0",
-                    "-i",
-                    concatList,
-                    "-c",
-                    "copy",
-                    outputPath,
-                  ],
-                  { stdio: ["ignore", "ignore", "pipe"] },
+
+              // Detect what codec the workers actually produced. 'auto' may
+              // have resolved to any of av1/h265/h264 depending on the
+              // engine; we need to know which so we can decide between a
+              // stream-copy concat and an AV1 re-encode pass.
+              const firstChunk = path.join(
+                chunksDir,
+                renderId,
+                "chunk-0.mp4",
+              );
+              const probeChunk = (chunkPath: string) =>
+                new Promise<{ codec: string; durationUs: number }>(
+                  (resolveProbe) => {
+                    const probe = spawn(ffmpegPath, ["-i", chunkPath], {
+                      stdio: ["ignore", "ignore", "pipe"],
+                    });
+                    let probeStderr = "";
+                    probe.stderr.on("data", (c) => {
+                      probeStderr += c.toString();
+                    });
+                    probe.on("close", () => {
+                      const codecM = /Video:\s+(\w+)/.exec(probeStderr);
+                      const durM =
+                        /Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/.exec(
+                          probeStderr,
+                        );
+                      const durationUs = durM
+                        ? (Number(durM[1]) * 3600 +
+                            Number(durM[2]) * 60 +
+                            Number(durM[3])) *
+                          1_000_000
+                        : 0;
+                      resolveProbe({
+                        codec: codecM?.[1]?.toLowerCase() ?? "unknown",
+                        durationUs,
+                      });
+                    });
+                    probe.on("error", () =>
+                      resolveProbe({ codec: "unknown", durationUs: 0 }),
+                    );
+                  },
                 );
+              // Probe every chunk: the concat demuxer prints Duration: N/A
+              // so we can't rely on ffmpeg's own duration line during the
+              // re-encode. Summing per-chunk durations gives an accurate
+              // denominator for progress. Chunks are fast to probe
+              // (metadata only).
+              const chunkProbes = await Promise.all(
+                Array.from({ length: workers }, (_, ci) =>
+                  probeChunk(
+                    path.join(chunksDir, renderId, `chunk-${ci}.mp4`),
+                  ),
+                ),
+              );
+              const chunkCodec = chunkProbes[0]?.codec ?? "unknown";
+              const totalDurationUs = chunkProbes.reduce(
+                (acc, p) => acc + p.durationUs,
+                0,
+              );
+
+              // AV1 chunks from WebCodecs sit around 1.2 Mbps for 1080p60.
+              // libsvtav1 at CRF 38 / preset 6 hits similar quality at
+              // ~0.5 Mbps — roughly a 60% file-size drop — so for AV1 we
+              // transcode the concat instead of stream-copying. Other
+              // codecs stream-copy as before (no quality loss, negligible
+              // time cost).
+              const ffArgs =
+                chunkCodec === "av1"
+                  ? [
+                      "-y",
+                      "-f",
+                      "concat",
+                      "-safe",
+                      "0",
+                      "-i",
+                      concatList,
+                      "-c:v",
+                      "libsvtav1",
+                      "-crf",
+                      "38",
+                      "-preset",
+                      "6",
+                      "-pix_fmt",
+                      "yuv420p",
+                      "-an",
+                      "-movflags",
+                      "+faststart",
+                      outputPath,
+                    ]
+                  : [
+                      "-y",
+                      "-f",
+                      "concat",
+                      "-safe",
+                      "0",
+                      "-i",
+                      concatList,
+                      "-c",
+                      "copy",
+                      outputPath,
+                    ];
+              const isReencode = chunkCodec === "av1";
+              if (isReencode) {
+                emit({ type: "stage", stage: "compressing" });
+              }
+              // -progress pipe:1 emits key=value lines on stdout at ~0.5s
+              // intervals. out_time_us is input-time progress in µs; we
+              // divide by the total input duration (parsed once from
+              // stderr) to compute a 0..1 ratio. Only wire this up for
+              // the re-encode path — stream-copy is fast enough that
+              // progress feedback would be noise.
+              const progressArgs = isReencode
+                ? [...ffArgs.slice(0, -1), "-progress", "pipe:1", ffArgs[ffArgs.length - 1]!]
+                : ffArgs;
+              await new Promise<void>((resolve, reject) => {
+                const ff = spawn(ffmpegPath, progressArgs, {
+                  stdio: ["ignore", isReencode ? "pipe" : "ignore", "pipe"],
+                });
+                // Register with the render state so abort / browser-close
+                // teardown can kill this process. Otherwise the encode
+                // keeps running — potentially pinning the CPU — after the
+                // user closes the app.
+                activeFfmpeg = ff;
+                activeFfmpegs.add(ff);
+                ff.on("close", () => activeFfmpegs.delete(ff));
                 let stderr = "";
                 ff.stderr.on("data", (chunk) => {
                   stderr += chunk.toString();
                 });
+                if (isReencode && ff.stdout) {
+                  let stdoutBuf = "";
+                  ff.stdout.on("data", (chunk) => {
+                    stdoutBuf += chunk.toString();
+                    let nl: number;
+                    while ((nl = stdoutBuf.indexOf("\n")) >= 0) {
+                      const line = stdoutBuf.slice(0, nl).trim();
+                      stdoutBuf = stdoutBuf.slice(nl + 1);
+                      const m = /^out_time_us=(\d+)/.exec(line);
+                      if (m && totalDurationUs > 0) {
+                        const p = Math.min(
+                          1,
+                          Number(m[1]) / totalDurationUs,
+                        );
+                        emit({ type: "compress-progress", progress: p });
+                      }
+                    }
+                  });
+                }
                 ff.on("error", (err) => {
                   if ((err as NodeJS.ErrnoException).code === "ENOENT") {
                     reject(

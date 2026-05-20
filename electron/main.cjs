@@ -57,11 +57,19 @@ const spawnVite = () => {
     args.push("preview");
   }
   args.push("--port", String(VITE_PORT), "--strictPort");
-  return spawn(process.execPath, args, {
+  const proc = spawn(process.execPath, args, {
     cwd: repoRoot,
     env,
-    stdio: "inherit",
+    stdio: ["ignore", "pipe", "pipe"],
   });
+  proc.stdout.on("data", (d) => process.stdout.write(d));
+  proc.stderr.on("data", (d) => {
+    process.stderr.write(d);
+    const msg = d.toString();
+    if (proc._lastError === undefined) proc._lastError = "";
+    proc._lastError += msg;
+  });
+  return proc;
 };
 
 const createWindow = async (url) => {
@@ -96,11 +104,12 @@ app.whenReady().then(async () => {
   if (!alreadyRunning) {
     viteProc = spawnVite();
     viteProc.on("exit", (code, signal) => {
+      const detail = viteProc?._lastError || "(no stderr captured)";
       viteProc = null;
-      if (code !== 0 && !signal) {
+      if (code !== 0 && !signal && code !== 143) {
         dialog.showErrorBox(
           "Vite exited",
-          `Vite dev server exited with code ${code}. Is port ${VITE_PORT} already in use by a different app?`,
+          `Vite dev server exited with code ${code}.\n\n${detail}`,
         );
         app.quit();
       }

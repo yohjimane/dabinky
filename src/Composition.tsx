@@ -45,6 +45,7 @@ export type VideoTrack = z.infer<typeof VideoTrackSchema>;
 export type TextTrack = z.infer<typeof TextTrackSchema>;
 
 export const MyCompositionSchema = z.object({
+  projectName: z.string().describe("Project name").default("").optional(),
   fadeDuration: z
     .number()
     .describe("Fade in/out duration in seconds")

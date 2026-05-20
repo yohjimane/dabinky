@@ -57,6 +57,9 @@ const EditorInner: React.FC<{ initial: MyCompositionProps }> = ({
   const [currentFrame, setCurrentFrame] = useState(0);
   const [selected, setSelected] = useState<Selection>(null);
   const [assetRefreshKey, setAssetRefreshKey] = useState(0);
+  const [newProjectDialog, setNewProjectDialog] = useState(false);
+  const [newProjectName, setNewProjectName] = useState("");
+  const [projectName, setProjectName] = useState(initial.projectName ?? "");
   const playerRef = React.useRef<PlayerRef>(null);
   const rightPanelRef = React.useRef<HTMLDivElement>(null);
 
@@ -122,7 +125,7 @@ const EditorInner: React.FC<{ initial: MyCompositionProps }> = ({
       const res = await fetch("/api/composition", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify(state),
+        body: JSON.stringify({ ...state, projectName }),
       });
       const json = await res.json();
       if (!json.ok) throw new Error(json.error ?? "save failed");
@@ -556,8 +559,10 @@ const EditorInner: React.FC<{ initial: MyCompositionProps }> = ({
     fetch("/api/composition")
       .then((r) => r.json())
       .then((json) => {
-        reset(json as MyCompositionProps);
-        setSavedSnapshot(json as MyCompositionProps);
+        const data = json as MyCompositionProps;
+        reset(data);
+        setSavedSnapshot(data);
+        setProjectName(data.projectName ?? "");
         setSelected(null);
       });
   };
@@ -575,22 +580,34 @@ const EditorInner: React.FC<{ initial: MyCompositionProps }> = ({
   const exportProject = useCallback(async () => {
     try {
       if (dirty) await save();
-      const stamp = new Date()
-        .toISOString()
-        .slice(0, 19)
-        .replace(/[:T]/g, "-");
-      const filename = `project-${stamp}`;
-      const a = document.createElement("a");
-      a.href = `/api/export-project?filename=${encodeURIComponent(filename)}`;
-      a.rel = "noopener";
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      flash("Export started");
+      const defaultName = projectName || "project";
+      const res = await fetch(`/api/export-project?filename=${encodeURIComponent(defaultName)}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const blob = await res.blob();
+      if ("showSaveFilePicker" in window) {
+        const handle = await (window as any).showSaveFilePicker({
+          suggestedName: `${defaultName}.dabinky`,
+          types: [{ description: "Dabinky Project", accept: { "application/zip": [".dabinky"] } }],
+        });
+        const writable = await handle.createWritable();
+        await writable.write(blob);
+        await writable.close();
+      } else {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `${defaultName}.dabinky`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+      }
+      flash("Exported ✓");
     } catch (err) {
+      if ((err as Error).name === "AbortError") return;
       setSaveMsg(`Export error: ${(err as Error).message}`);
     }
-  }, [dirty, save]);
+  }, [dirty, save, projectName]);
 
   const openImportPicker = useCallback(() => {
     if (
@@ -625,6 +642,7 @@ const EditorInner: React.FC<{ initial: MyCompositionProps }> = ({
         const imported = json.composition as MyCompositionProps;
         reset(imported);
         setSavedSnapshot(imported);
+        setProjectName(imported.projectName ?? "");
         setSelected(null);
         // Bounce MediaPool's asset list — freshly imported media files won't
         // show up otherwise until the next manual refresh.
@@ -687,38 +705,13 @@ const EditorInner: React.FC<{ initial: MyCompositionProps }> = ({
             borderBottom: "1px solid #1e1e24",
           }}
         >
-          <strong style={{ marginRight: "auto" }}>Editor</strong>
+          <strong style={{ marginRight: "auto" }}>
+            Editor{projectName && <span style={{ fontWeight: 400, color: "#8b8b94" }}>{" — "}{projectName}</span>}
+          </strong>
           <IconButton
-            onClick={async () => {
-              if (!confirm("Start a new project? This will clear the timeline and media pool.")) return;
-              const name = prompt("Project name:");
-              if (!name) return;
-              const blank: MyCompositionProps = {
-                fadeDuration: 0.5,
-                fontSize: 32,
-                textColor: "#ffffff",
-                bgColor: "rgba(0, 0, 0, 0.7)",
-                bgBorderRadius: 12,
-                paddingBottom: 50,
-                videoTracks: [{ id: newTrackId("v"), name: "V1", clips: [] }],
-                textTracks: [{ id: newTrackId("t"), name: "T1", segments: [] }],
-              };
-              await fetch("/api/clear-media", { method: "POST" });
-              const res = await fetch("/api/composition", {
-                method: "POST",
-                headers: { "content-type": "application/json" },
-                body: JSON.stringify(blank),
-              });
-              if (!(await res.json()).ok) {
-                setSaveMsg("Error creating project");
-                return;
-              }
-              reset(blank);
-              setSavedSnapshot(blank);
-              setSelected(null);
-              setCurrentFrame(0);
-              setAssetRefreshKey((k) => k + 1);
-              setSaveMsg(`New project: ${name}`);
+            onClick={() => {
+              setNewProjectName("");
+              setNewProjectDialog(true);
             }}
             title="Clear timeline and start fresh"
           >
@@ -958,6 +951,126 @@ const EditorInner: React.FC<{ initial: MyCompositionProps }> = ({
           }}
         />
       </div>
+      {newProjectDialog && (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(0,0,0,0.6)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            zIndex: 9999,
+          }}
+          onClick={() => setNewProjectDialog(false)}
+        >
+          <div
+            style={{
+              background: "#1a1a22",
+              borderRadius: 12,
+              padding: 24,
+              minWidth: 340,
+              display: "flex",
+              flexDirection: "column",
+              gap: 16,
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <strong style={{ color: "#fff", fontSize: 16 }}>New Project</strong>
+            <p style={{ color: "#aaa", fontSize: 13, margin: 0 }}>
+              This will clear the timeline and media pool.
+            </p>
+            <input
+              autoFocus
+              type="text"
+              placeholder="Project name"
+              value={newProjectName}
+              onChange={(e) => setNewProjectName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Escape") setNewProjectDialog(false);
+                if (e.key === "Enter" && newProjectName.trim()) {
+                  (e.target as HTMLInputElement).closest("div")
+                    ?.querySelector<HTMLButtonElement>("button[data-create]")
+                    ?.click();
+                }
+              }}
+              style={{
+                background: "#0c0c10",
+                border: "1px solid #333",
+                borderRadius: 6,
+                padding: "8px 12px",
+                color: "#fff",
+                fontSize: 14,
+                outline: "none",
+              }}
+            />
+            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+              <button
+                onClick={() => setNewProjectDialog(false)}
+                style={{
+                  background: "#2a2a34",
+                  border: "none",
+                  borderRadius: 6,
+                  padding: "6px 16px",
+                  color: "#ccc",
+                  cursor: "pointer",
+                  fontSize: 13,
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                data-create
+                disabled={!newProjectName.trim()}
+                onClick={async () => {
+                  const name = newProjectName.trim();
+                  setNewProjectDialog(false);
+                  const blank: MyCompositionProps = {
+                    projectName: name,
+                    fadeDuration: 0.5,
+                    fontSize: 32,
+                    textColor: "#ffffff",
+                    bgColor: "rgba(0, 0, 0, 0.7)",
+                    bgBorderRadius: 12,
+                    paddingBottom: 50,
+                    videoTracks: [{ id: newTrackId("v"), name: "V1", clips: [] }],
+                    textTracks: [{ id: newTrackId("t"), name: "T1", segments: [] }],
+                  };
+                  await fetch("/api/clear-media", { method: "POST" });
+                  const res = await fetch("/api/composition", {
+                    method: "POST",
+                    headers: { "content-type": "application/json" },
+                    body: JSON.stringify(blank),
+                  });
+                  if (!(await res.json()).ok) {
+                    setSaveMsg("Error creating project");
+                    return;
+                  }
+                  reset(blank);
+                  setSavedSnapshot(blank);
+                  setSelected(null);
+                  setCurrentFrame(0);
+                  setAssetRefreshKey((k) => k + 1);
+                  setProjectName(name);
+                  setSaveMsg(`New project: ${name}`);
+                }}
+                style={{
+                  background: !newProjectName.trim() ? "#333" : "#4f6df5",
+                  border: "none",
+                  borderRadius: 6,
+                  padding: "6px 16px",
+                  color: "#fff",
+                  cursor: !newProjectName.trim() ? "default" : "pointer",
+                  fontSize: 13,
+                  opacity: !newProjectName.trim() ? 0.5 : 1,
+                }}
+              >
+                Create
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

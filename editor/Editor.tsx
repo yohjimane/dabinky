@@ -32,15 +32,51 @@ const newTrackId = (prefix: string) =>
 
 export const Editor: React.FC = () => {
   const [loaded, setLoaded] = useState<MyCompositionProps | null>(null);
+  const [initStatus, setInitStatus] = useState("Loading composition…");
 
   useEffect(() => {
-    fetch("/api/composition")
-      .then((r) => r.json())
-      .then((json) => setLoaded(json as MyCompositionProps));
+    (async () => {
+      const compositionRes = await fetch("/api/composition");
+      const data = (await compositionRes.json()) as MyCompositionProps;
+
+      const sources = data.videoTracks.flatMap((t) =>
+        t.clips.map((c) => c.src),
+      );
+      if (sources.length > 0) {
+        setInitStatus("Checking media compatibility…");
+        try {
+          const res = await fetch("/api/ensure-h264", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ sources }),
+          });
+          const json = await res.json();
+          if (json.ok && json.transcoded) {
+            const map = json.transcoded as Record<string, string>;
+            if (Object.keys(map).length > 0) {
+              for (const track of data.videoTracks) {
+                for (const clip of track.clips) {
+                  if (map[clip.src]) clip.src = map[clip.src];
+                }
+              }
+              await fetch("/api/composition", {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify(data),
+              });
+            }
+          }
+        } catch {
+          // Non-fatal — rendering may be slow but won't crash
+        }
+      }
+
+      setLoaded(data);
+    })();
   }, []);
 
   if (!loaded) {
-    return <div style={{ padding: 40 }}>Loading composition…</div>;
+    return <div style={{ padding: 40 }}>{initStatus}</div>;
   }
   return <EditorInner initial={loaded} />;
 };

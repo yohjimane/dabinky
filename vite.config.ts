@@ -1280,6 +1280,67 @@ function attachDabinkyMiddlewares(
           }
         });
 
+        server.middlewares.use("/api/ensure-h264", (req, res) => {
+          if (req.method !== "POST") {
+            res.statusCode = 405;
+            res.end("method not allowed");
+            return;
+          }
+          let body = "";
+          req.on("data", (c) => {
+            body += c;
+          });
+          req.on("end", async () => {
+            try {
+              const { sources } = JSON.parse(body) as {
+                sources?: string[];
+              };
+              if (!Array.isArray(sources) || sources.length === 0) {
+                res.setHeader("content-type", "application/json");
+                res.end(JSON.stringify({ ok: true, transcoded: {} }));
+                return;
+              }
+              const seen = new Set<string>();
+              const transcoded: Record<string, string> = {};
+              for (const src of sources) {
+                if (seen.has(src)) continue;
+                seen.add(src);
+                const abs = resolveAssetPath(src);
+                if (!abs || !fs.existsSync(abs)) continue;
+                const codec = await probeVideoCodec(abs);
+                if (!HEVC_CODECS.has(codec)) continue;
+                const stem = path.basename(abs, path.extname(abs));
+                const outName = `${stem}.h264.mp4`;
+                const outAbs = path.join(path.dirname(abs), outName);
+                if (fs.existsSync(outAbs)) {
+                  const isInMedia = abs.startsWith(mediaDir + path.sep);
+                  const prefix = isInMedia ? "media" : "";
+                  transcoded[src] = prefix
+                    ? `${prefix}/${outName}`
+                    : outName;
+                  continue;
+                }
+                await transcodeToH264(abs, outAbs);
+                const isInMedia = abs.startsWith(mediaDir + path.sep);
+                const prefix = isInMedia ? "media" : "";
+                transcoded[src] = prefix
+                  ? `${prefix}/${outName}`
+                  : outName;
+              }
+              res.setHeader("content-type", "application/json");
+              res.end(JSON.stringify({ ok: true, transcoded }));
+            } catch (err) {
+              res.statusCode = 500;
+              res.end(
+                JSON.stringify({
+                  ok: false,
+                  error: (err as Error).message,
+                }),
+              );
+            }
+          });
+        });
+
         server.middlewares.use("/api/save-render", (req, res) => {
           if (req.method !== "POST") {
             res.statusCode = 405;

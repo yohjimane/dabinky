@@ -526,7 +526,12 @@ const EditorInner: React.FC<{ initial: MyCompositionProps }> = ({
       } else if (targetIdx < 0 || targetIdx >= tracks.length) {
         targetIdx = 0;
       }
-      const from = secs(currentSeconds);
+      const existingClips = tracks[targetIdx].clips;
+      const timelineEnd = existingClips.reduce(
+        (max, c) => Math.max(max, c.from + (c.endAt - c.startFrom)),
+        0,
+      );
+      const from = secs(existingClips.length > 0 ? timelineEnd : currentSeconds);
       const clip: Clip = { src, from, startFrom: 0, endAt: durationSec };
       const newTracks = tracks.map((t, i) =>
         i === targetIdx ? { ...t, clips: [...t.clips, clip] } : t,
@@ -1557,17 +1562,14 @@ const RenderButton: React.FC<{
     try {
       const safeName = filename || defaultRenderName();
 
-      if (workers > 1) {
-        // For the parallel path we ship the user's raw choice ("auto" or an
-        // explicit codec) to the worker pages. Workers run in headless
-        // Chromium, which has different codec support from the editor tab
-        // (which might be Safari with AV1), so they must probe for
-        // themselves — the editor's probe isn't valid for them.
-        const engine: Engine =
-          engineOverride === "auto" ? detectEngine() : engineOverride;
+      const engine: Engine =
+        engineOverride === "auto" ? detectEngine() : engineOverride;
+      const useParallelPath = workers > 1 || engine === "webkit";
+
+      if (useParallelPath) {
         await runParallelRender({
           filename: safeName,
-          workers,
+          workers: Math.max(workers, 1),
           codec,
           bitrate,
           engine,
@@ -1772,54 +1774,52 @@ const RenderButton: React.FC<{
                 value={workers}
                 onChange={(e) => setWorkers(Number(e.target.value))}
               >
-                <option value={1}>1 — in-browser (fastest startup)</option>
+                <option value={1}>1</option>
                 {[2, 3, 4, 5, 6, 7, 8].map((n) => (
                   <option key={n} value={n}>
                     {n} — parallel
                   </option>
                 ))}
               </select>
-              {workers > 1 && (
-                <>
-                  <div style={{ ...labelStyle, marginTop: 8 }}>
-                    Engine
-                  </div>
-                  <select
-                    style={{ ...inputStyle, cursor: "pointer" }}
-                    value={engineOverride}
-                    onChange={(e) =>
-                      setEngineOverride(
-                        e.target.value as "auto" | Engine,
-                      )
-                    }
-                  >
-                    <option value="auto">
-                      Auto — match this tab ({detectEngine()})
-                    </option>
-                    <option value="chromium">Chromium</option>
-                    <option value="webkit">
-                      WebKit (hardware AV1 on M3+)
-                    </option>
-                  </select>
-                  <div
-                    style={{
-                      marginTop: 4,
-                      color: "#c9a94b",
-                      fontSize: 11,
-                      lineHeight: 1.4,
-                    }}
-                  >
-                    Spawns {workers} headless Playwright{" "}
-                    {(engineOverride === "auto"
-                      ? detectEngine()
-                      : engineOverride) === "webkit"
-                      ? "WebKit"
-                      : "Chromium"}{" "}
-                    processes, concats with ffmpeg. Detected{" "}
-                    {navigator.hardwareConcurrency ?? "?"} logical cores —
-                    try larger values if CPU is under-utilized.
-                  </div>
-                </>
+              <div style={{ ...labelStyle, marginTop: 8 }}>
+                Engine
+              </div>
+              <select
+                style={{ ...inputStyle, cursor: "pointer" }}
+                value={engineOverride}
+                onChange={(e) =>
+                  setEngineOverride(
+                    e.target.value as "auto" | Engine,
+                  )
+                }
+              >
+                <option value="auto">
+                  Auto — match this tab ({detectEngine()})
+                </option>
+                <option value="chromium">Chromium</option>
+                <option value="webkit">WebKit</option>
+              </select>
+              {(workers > 1 || engineOverride === "webkit") && (
+                <div
+                  style={{
+                    marginTop: 4,
+                    color: "#c9a94b",
+                    fontSize: 11,
+                    lineHeight: 1.4,
+                  }}
+                >
+                  {engineOverride === "webkit" && workers === 1
+                    ? "Renders via headless Playwright WebKit (bypasses Electron Chromium)."
+                    : `Spawns ${workers} headless Playwright ${
+                        (engineOverride === "auto"
+                          ? detectEngine()
+                          : engineOverride) === "webkit"
+                          ? "WebKit"
+                          : "Chromium"
+                      } processes, concats with ffmpeg. Detected ${
+                        navigator.hardwareConcurrency ?? "?"
+                      } logical cores.`}
+                </div>
               )}
               <div style={{ display: "flex", gap: 6, marginTop: 12 }}>
                 <button style={splitBtnStyle} onClick={() => setOpen(false)}>
@@ -1927,7 +1927,7 @@ const RenderStatsRow: React.FC<{ stats: RenderStats }> = ({ stats }) => {
     ],
     [
       "Workers",
-      stats.workers === 1 ? "1 (in-browser)" : `${stats.workers} (parallel)`,
+      `${stats.workers}`,
     ],
   ];
   return (

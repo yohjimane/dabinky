@@ -1601,9 +1601,7 @@ function attachDabinkyMiddlewares(
               // Chromium gives fast HEVC parallel, WebKit gives AV1 parallel
               // (M3+ has hardware AV1 encoder).
               const engine =
-                parsed.engine === "webkit" && process.platform === "darwin"
-                  ? "webkit"
-                  : "chromium";
+                parsed.engine === "webkit" ? "webkit" : "chromium";
               emit({ type: "stage", stage: "starting-browsers", engine });
               const playwright = await import("playwright");
               const launcher = engine === "webkit" ? playwright.webkit : playwright.chromium;

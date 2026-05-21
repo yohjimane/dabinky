@@ -60,6 +60,7 @@
     "appId": "com.dabinky.app",
     "productName": "Dabinky",
     "asar": false,
+    "afterPack": "./scripts/after-pack.cjs",
     "extraResources": [
       {
         "from": "pw-browsers",

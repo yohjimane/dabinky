@@ -15,8 +15,9 @@ const extOf = (name: string) => {
 export const MediaPool: React.FC<{
   usedSources: Set<string>;
   onAdd: (name: string, durationSec: number) => void;
+  onDelete?: (name: string) => void;
   reloadKey?: number;
-}> = ({ usedSources, onAdd, reloadKey }) => {
+}> = ({ usedSources, onAdd, onDelete, reloadKey }) => {
   const [assets, setAssets] = useState<Asset[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
@@ -34,6 +35,25 @@ export const MediaPool: React.FC<{
       .then((json) => setAssets(json.assets ?? []))
       .catch((err) => setError((err as Error).message));
   }, []);
+
+  const deleteAsset = useCallback(
+    (name: string) => {
+      fetch("/api/delete-asset", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name }),
+      })
+        .then((r) => r.json())
+        .then((json) => {
+          if (json.ok) {
+            setAssets((prev) => prev?.filter((a) => a.name !== name) ?? null);
+            onDelete?.(name);
+          }
+        })
+        .catch(() => {});
+    },
+    [onDelete],
+  );
 
   useEffect(() => {
     refresh();
@@ -229,6 +249,7 @@ export const MediaPool: React.FC<{
             asset={a}
             used={usedSources.has(a.name)}
             onAdd={onAdd}
+            onDelete={deleteAsset}
           />
         ))}
       </div>
@@ -268,8 +289,10 @@ const AssetCard: React.FC<{
   asset: Asset;
   used: boolean;
   onAdd: (name: string, durationSec: number) => void;
-}> = ({ asset, used, onAdd }) => {
+  onDelete: (name: string) => void;
+}> = ({ asset, used, onAdd, onDelete }) => {
   const [duration, setDuration] = useState<number | null>(null);
+  const [hovered, setHovered] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
 
   return (
@@ -285,8 +308,11 @@ const AssetCard: React.FC<{
         e.dataTransfer.setData("text/plain", asset.name);
         e.dataTransfer.effectAllowed = "copy";
       }}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
       title="Drag to a track, or click to add at playhead"
       style={{
+        position: "relative",
         display: "flex",
         flexDirection: "column",
         background: "#1a1a20",
@@ -298,6 +324,35 @@ const AssetCard: React.FC<{
         gap: 6,
       }}
     >
+      {hovered && (
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            onDelete(asset.name);
+          }}
+          style={{
+            position: "absolute",
+            top: 4,
+            right: 4,
+            zIndex: 5,
+            width: 20,
+            height: 20,
+            borderRadius: 4,
+            background: "#c53030",
+            color: "#fff",
+            border: "none",
+            cursor: "pointer",
+            fontSize: 13,
+            fontWeight: 700,
+            lineHeight: "20px",
+            textAlign: "center",
+            padding: 0,
+          }}
+          title="Delete asset"
+        >
+          ×
+        </button>
+      )}
       <div
         style={{
           position: "relative",

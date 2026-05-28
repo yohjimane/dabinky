@@ -16,6 +16,405 @@ import { UpdateNotification } from "./UpdateNotification";
 const FPS = 60;
 const WIDTH = 1920;
 const HEIGHT = 1080;
+const OVERSCAN = 1.5;
+const OVERSCAN_W = Math.round(WIDTH * OVERSCAN);
+const OVERSCAN_H = Math.round(HEIGHT * OVERSCAN);
+
+const makeOverscanWrapper = <P extends object>(
+  Inner: React.ComponentType<P>,
+): React.FC<P> => {
+  const Wrapped: React.FC<P> = (props) => {
+    const padX = (OVERSCAN_W - WIDTH) / 2;
+    const padY = (OVERSCAN_H - HEIGHT) / 2;
+    return (
+      <div style={{ position: "absolute", inset: 0, background: "#080808" }}>
+        <div
+          style={{
+            position: "absolute",
+            left: padX,
+            top: padY,
+            width: WIDTH,
+            height: HEIGHT,
+            overflow: "visible",
+          }}
+        >
+          <div style={{ position: "relative", width: WIDTH, height: HEIGHT }}>
+            <Inner {...props} />
+          </div>
+        </div>
+        <div style={{ position: "absolute", inset: 0, pointerEvents: "none" }}>
+          <div
+            style={{
+              position: "absolute",
+              top: 0,
+              left: 0,
+              right: 0,
+              height: padY,
+              background: "rgba(0,0,0,0.55)",
+            }}
+          />
+          <div
+            style={{
+              position: "absolute",
+              bottom: 0,
+              left: 0,
+              right: 0,
+              height: padY,
+              background: "rgba(0,0,0,0.55)",
+            }}
+          />
+          <div
+            style={{
+              position: "absolute",
+              top: padY,
+              left: 0,
+              width: padX,
+              height: HEIGHT,
+              background: "rgba(0,0,0,0.55)",
+            }}
+          />
+          <div
+            style={{
+              position: "absolute",
+              top: padY,
+              right: 0,
+              width: padX,
+              height: HEIGHT,
+              background: "rgba(0,0,0,0.55)",
+            }}
+          />
+          <div
+            style={{
+              position: "absolute",
+              left: padX - 1,
+              top: padY - 1,
+              width: WIDTH + 2,
+              height: HEIGHT + 2,
+              border: "1px solid rgba(255,255,255,0.15)",
+            }}
+          />
+          {[1, 2].map((i) => (
+            <React.Fragment key={`third-${i}`}>
+              <div
+                style={{
+                  position: "absolute",
+                  left: padX + (WIDTH * i) / 3,
+                  top: 0,
+                  width: 1,
+                  height: OVERSCAN_H,
+                  background: "rgba(255,255,255,0.08)",
+                }}
+              />
+              <div
+                style={{
+                  position: "absolute",
+                  left: 0,
+                  top: padY + (HEIGHT * i) / 3,
+                  width: OVERSCAN_W,
+                  height: 1,
+                  background: "rgba(255,255,255,0.08)",
+                }}
+              />
+            </React.Fragment>
+          ))}
+        </div>
+      </div>
+    );
+  };
+  Wrapped.displayName = `Overscan(${Inner.displayName || Inner.name})`;
+  return Wrapped;
+};
+
+const OverscanScreenDemo = makeOverscanWrapper(ScreenDemo);
+const OverscanMyComposition = makeOverscanWrapper(MyComposition);
+
+const getCursorAtFrame = (
+  frame: number,
+  events: MouseEventDef[],
+): { x: number; y: number; clicking: boolean } | null => {
+  if (events.length === 0) return null;
+  const sorted = [...events].sort((a, b) => a.frame - b.frame);
+  if (frame < sorted[0].frame) return null;
+
+  const exact = sorted.find((e) => e.frame === frame);
+  if (exact) return { x: exact.x, y: exact.y, clicking: exact.type === "click" };
+
+  const beforeArr = sorted.filter((e) => e.frame <= frame);
+  const before = beforeArr[beforeArr.length - 1];
+  const after = sorted.find((e) => e.frame > frame);
+  if (before && after) {
+    const t = (frame - before.frame) / (after.frame - before.frame);
+    const ease = t * t * (3 - 2 * t);
+    return {
+      x: before.x + (after.x - before.x) * ease,
+      y: before.y + (after.y - before.y) * ease,
+      clicking: false,
+    };
+  }
+  if (before) return { x: before.x, y: before.y, clicking: false };
+  return null;
+};
+
+const CURSOR_SVG = (
+  <svg
+    width="20"
+    height="20"
+    viewBox="0 0 24 24"
+    fill="none"
+    style={{ filter: "drop-shadow(0 1px 2px rgba(0,0,0,0.6))" }}
+  >
+    <path
+      d="M5.5 3.2l12.8 7.3-5.3 1.7-3.7 5.5z"
+      fill="#fff"
+      stroke="#111"
+      strokeWidth="1.2"
+      strokeLinejoin="round"
+    />
+  </svg>
+);
+
+type DragTarget =
+  | { kind: "seek" }
+  | { kind: "keyframe"; index: number }
+  | { kind: "mouse"; index: number };
+
+const ScreenDemoTimeline: React.FC<{
+  currentFrame: number;
+  totalFrames: number;
+  fps: number;
+  keyframes: { frame: number }[];
+  mouseEvents: MouseEventDef[];
+  onSeek: (frame: number) => void;
+  onKeyframeFrame: (index: number, frame: number) => void;
+  onMouseEventFrame: (index: number, frame: number) => void;
+}> = ({
+  currentFrame,
+  totalFrames,
+  fps,
+  keyframes,
+  mouseEvents,
+  onSeek,
+  onKeyframeFrame,
+  onMouseEventFrame,
+}) => {
+  const barRef = React.useRef<HTMLDivElement>(null);
+  const [drag, setDrag] = useState<DragTarget | null>(null);
+
+  const pct = (frame: number) =>
+    totalFrames > 0 ? `${(frame / totalFrames) * 100}%` : "0%";
+
+  const frameFromPointer = (e: React.PointerEvent) => {
+    const bar = barRef.current;
+    if (!bar) return 0;
+    const rect = bar.getBoundingClientRect();
+    const t = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+    return Math.round(t * (totalFrames - 1));
+  };
+
+  const onBarPointerDown = (e: React.PointerEvent) => {
+    (e.target as HTMLElement).setPointerCapture(e.pointerId);
+    setDrag({ kind: "seek" });
+    onSeek(frameFromPointer(e));
+  };
+
+  const onMarkerPointerDown = (
+    e: React.PointerEvent,
+    target: DragTarget,
+  ) => {
+    e.stopPropagation();
+    (e.target as HTMLElement).setPointerCapture(e.pointerId);
+    setDrag(target);
+  };
+
+  const onPointerMove = (e: React.PointerEvent) => {
+    if (!drag) return;
+    const f = frameFromPointer(e);
+    if (drag.kind === "seek") {
+      onSeek(f);
+    } else if (drag.kind === "keyframe") {
+      onKeyframeFrame(drag.index, f);
+    } else if (drag.kind === "mouse") {
+      onMouseEventFrame(drag.index, f);
+    }
+  };
+
+  const onPointerUp = () => setDrag(null);
+
+  const totalSec = totalFrames / fps;
+  const stepSec = totalSec <= 10 ? 1 : totalSec <= 30 ? 2 : 5;
+  const ticks: number[] = [];
+  for (let s = 0; s <= totalSec; s += stepSec) ticks.push(s);
+
+  const laneStyle: React.CSSProperties = {
+    position: "relative",
+    height: 20,
+  };
+  const lineStyle: React.CSSProperties = {
+    position: "absolute",
+    top: "50%",
+    left: 0,
+    right: 0,
+    height: 1,
+    background: "#1e1e24",
+  };
+  const labelStyle: React.CSSProperties = {
+    position: "absolute",
+    left: -54,
+    width: 48,
+    textAlign: "right",
+    top: "50%",
+    transform: "translateY(-50%)",
+    fontSize: 9,
+    color: "#5a5a64",
+    textTransform: "uppercase",
+    letterSpacing: 0.5,
+  };
+  const markerGrab: React.CSSProperties = {
+    cursor: "grab",
+    zIndex: 1,
+  };
+
+  return (
+    <div
+      style={{
+        gridColumn: 2,
+        gridRow: 3,
+        height: 86,
+        background: "#0a0a0e",
+        borderTop: "1px solid #1e1e24",
+        padding: "8px 16px 6px 70px",
+        display: "flex",
+        flexDirection: "column",
+        userSelect: "none",
+      }}
+    >
+      <div
+        ref={barRef}
+        style={{
+          flex: 1,
+          position: "relative",
+          cursor: drag ? "grabbing" : "crosshair",
+        }}
+        onPointerDown={onBarPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={onPointerUp}
+      >
+        {/* Camera lane */}
+        <div style={laneStyle}>
+          <div style={lineStyle} />
+          <span style={labelStyle}>Camera</span>
+          {keyframes.map((kf, i) => (
+            <div
+              key={i}
+              title={`Keyframe #${i + 1} — frame ${kf.frame}`}
+              onPointerDown={(e) =>
+                onMarkerPointerDown(e, { kind: "keyframe", index: i })
+              }
+              style={{
+                ...markerGrab,
+                position: "absolute",
+                left: pct(kf.frame),
+                top: "50%",
+                transform: "translate(-50%,-50%)",
+                width: 10,
+                height: 10,
+                borderRadius: 2,
+                background:
+                  drag?.kind === "keyframe" && drag.index === i
+                    ? "#6b8fd4"
+                    : "#4a6aa8",
+                border: "1px solid #6b8fd4",
+              }}
+            />
+          ))}
+        </div>
+
+        {/* Mouse lane */}
+        <div style={{ ...laneStyle, marginTop: 2 }}>
+          <div style={lineStyle} />
+          <span style={labelStyle}>Mouse</span>
+          {mouseEvents.map((ev, i) => {
+            const isClick = ev.type === "click";
+            const active = drag?.kind === "mouse" && drag.index === i;
+            return (
+              <div
+                key={i}
+                title={`${ev.type} (${ev.x}, ${ev.y}) — frame ${ev.frame}`}
+                onPointerDown={(e) =>
+                  onMarkerPointerDown(e, { kind: "mouse", index: i })
+                }
+                style={{
+                  ...markerGrab,
+                  position: "absolute",
+                  left: pct(ev.frame),
+                  top: "50%",
+                  transform: "translate(-50%,-50%)",
+                  width: isClick ? 12 : 9,
+                  height: isClick ? 12 : 9,
+                  borderRadius: "50%",
+                  background: active
+                    ? isClick
+                      ? "#fbbf24"
+                      : "#fff"
+                    : isClick
+                      ? "#f59e0b"
+                      : "#e8e8ea",
+                  border: isClick ? "1.5px solid #d97706" : "1px solid #aaa",
+                }}
+              />
+            );
+          })}
+        </div>
+
+        {/* Playhead */}
+        <div
+          style={{
+            position: "absolute",
+            left: pct(currentFrame),
+            top: 0,
+            bottom: 0,
+            width: 1.5,
+            background: "#e8e8ea",
+            transform: "translateX(-0.75px)",
+            pointerEvents: "none",
+            zIndex: 2,
+          }}
+        >
+          <div
+            style={{
+              position: "absolute",
+              top: -3,
+              left: -3,
+              width: 7,
+              height: 7,
+              borderRadius: "50%",
+              background: "#fff",
+            }}
+          />
+        </div>
+      </div>
+
+      {/* Time ticks */}
+      <div style={{ position: "relative", height: 14, marginTop: 2 }}>
+        {ticks.map((s) => (
+          <span
+            key={s}
+            style={{
+              position: "absolute",
+              left: pct(Math.round(s * fps)),
+              transform: "translateX(-50%)",
+              fontSize: 9,
+              color: "#5a5a64",
+              fontVariantNumeric: "tabular-nums",
+            }}
+          >
+            {s}s
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+};
 
 const computeDuration = (data: MyCompositionProps): number => {
   const clipEnds = data.videoTracks.flatMap((t) =>
@@ -32,6 +431,13 @@ const secs = (n: number) => Math.round(n * 1000) / 1000;
 
 const newTrackId = (prefix: string) =>
   `${prefix}${Date.now().toString(36).slice(-5)}`;
+
+type MouseEventDef = {
+  frame: number;
+  type: "move" | "click";
+  x: number;
+  y: number;
+};
 
 type EditorMode = "timeline" | "screen-demo";
 
@@ -173,8 +579,9 @@ type CaptureAsset = { name: string; size: number; mtime: number };
 const CaptureList: React.FC<{
   selected: string;
   onSelect: (src: string) => void;
+  onDelete: (name: string) => void;
   refreshKey: number;
-}> = ({ selected, onSelect, refreshKey }) => {
+}> = ({ selected, onSelect, onDelete, refreshKey }) => {
   const [assets, setAssets] = useState<CaptureAsset[]>([]);
 
   useEffect(() => {
@@ -188,6 +595,24 @@ const CaptureList: React.FC<{
       })
       .catch(() => {});
   }, [refreshKey]);
+
+  const deleteCapture = (name: string) => {
+    fetch("/api/delete-asset", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name }),
+    })
+      .then((r) => r.json())
+      .then((json) => {
+        if (json.ok) {
+          setAssets((prev) => prev.filter((a) => a.name !== name));
+          onDelete(name);
+        }
+      })
+      .catch(() => {});
+  };
+
+  const [hoveredName, setHoveredName] = useState<string | null>(null);
 
   if (assets.length === 0) {
     return (
@@ -212,7 +637,10 @@ const CaptureList: React.FC<{
           <div
             key={a.name}
             onClick={() => onSelect(a.name)}
+            onMouseEnter={() => setHoveredName(a.name)}
+            onMouseLeave={() => setHoveredName(null)}
             style={{
+              position: "relative",
               background: active ? "#1e2a3a" : "#1a1a20",
               border: `1px solid ${active ? "#3b6aa8" : "#26262e"}`,
               borderRadius: 8,
@@ -221,6 +649,35 @@ const CaptureList: React.FC<{
               cursor: "pointer",
             }}
           >
+            {hoveredName === a.name && (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  deleteCapture(a.name);
+                }}
+                style={{
+                  position: "absolute",
+                  top: 4,
+                  right: 4,
+                  zIndex: 5,
+                  width: 20,
+                  height: 20,
+                  borderRadius: 4,
+                  background: "#c53030",
+                  color: "#fff",
+                  border: "none",
+                  cursor: "pointer",
+                  fontSize: 13,
+                  fontWeight: 700,
+                  lineHeight: "20px",
+                  textAlign: "center",
+                  padding: 0,
+                }}
+                title="Delete capture"
+              >
+                ×
+              </button>
+            )}
             <div
               style={{
                 position: "relative",
@@ -264,13 +721,7 @@ const CaptureList: React.FC<{
             >
               {a.name.split("/").pop()}
             </div>
-            <div
-              style={{
-                fontSize: 10,
-                color: "#5a5a64",
-                marginTop: 2,
-              }}
-            >
+            <div style={{ fontSize: 10, color: "#5a5a64", marginTop: 2 }}>
               {(a.size / 1024 / 1024).toFixed(1)} MB
             </div>
           </div>
@@ -283,27 +734,82 @@ const CaptureList: React.FC<{
 const ScreenDemoEditor: React.FC<{
   onCaptureComplete: () => void;
 }> = ({ onCaptureComplete }) => {
-  const [props, setProps] = useState<ScreenDemoProps>(DEFAULT_SCREEN_DEMO_PROPS);
+  type ScreenDemoState = { props: ScreenDemoProps; mouseEvents: MouseEventDef[] };
+  const {
+    state: { props, mouseEvents },
+    set: setState,
+    undo,
+    redo,
+    canUndo,
+    canRedo,
+  } = useHistory<ScreenDemoState>({
+    props: DEFAULT_SCREEN_DEMO_PROPS,
+    mouseEvents: [],
+  });
+  const setProps = useCallback(
+    (fn: (p: ScreenDemoProps) => ScreenDemoProps, coalesce?: string) =>
+      setState((s) => ({ ...s, props: fn(s.props) }), { coalesce }),
+    [setState],
+  );
+  const setMouseEvents = useCallback(
+    (fn: (m: MouseEventDef[]) => MouseEventDef[], coalesce?: string) =>
+      setState((s) => ({ ...s, mouseEvents: fn(s.mouseEvents) }), { coalesce }),
+    [setState],
+  );
   const [durationSec, setDurationSec] = useState(12);
   const [captureName, setCaptureName] = useState(defaultCaptureName());
   const [captureState, setCaptureState] = useState<CaptureState>({
     kind: "idle",
   });
   const [captureRefreshKey, setCaptureRefreshKey] = useState(0);
+  const [exportState, setExportState] = useState<CaptureState>({ kind: "idle" });
+  const [overscan, setOverscan] = useState(false);
+  const [showCursor, setShowCursor] = useState(true);
+  const [currentFrame, setCurrentFrame] = useState(0);
   const playerRef = React.useRef<PlayerRef>(null);
 
   const durationInFrames = Math.max(1, Math.ceil(durationSec * FPS));
 
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === " " && !e.metaKey && !e.ctrlKey) {
+        const tag = (e.target as HTMLElement).tagName;
+        if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+        e.preventDefault();
+        playerRef.current?.toggle();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  useEffect(() => {
+    const player = playerRef.current;
+    if (!player) return;
+    const onFrame = () => setCurrentFrame(player.getCurrentFrame());
+    player.addEventListener("frameupdate", onFrame as never);
+    return () => player.removeEventListener("frameupdate", onFrame as never);
+  }, []);
+
+  const cursorAtFrame = useMemo(
+    () => getCursorAtFrame(currentFrame, mouseEvents),
+    [currentFrame, mouseEvents],
+  );
+
   const updateKeyframe = (
     idx: number,
     patch: Partial<ScreenDemoProps["keyframes"][number]>,
+    coalesceKey?: string,
   ) => {
-    setProps((prev) => ({
-      ...prev,
-      keyframes: prev.keyframes.map((kf, i) =>
-        i === idx ? { ...kf, ...patch } : kf,
-      ),
-    }));
+    setProps(
+      (prev) => ({
+        ...prev,
+        keyframes: prev.keyframes.map((kf, i) =>
+          i === idx ? { ...kf, ...patch } : kf,
+        ),
+      }),
+      coalesceKey,
+    );
   };
 
   const addKeyframe = () => {
@@ -345,6 +851,7 @@ const ScreenDemoEditor: React.FC<{
           width: WIDTH,
           height: HEIGHT,
           output: captureName,
+          mouseEvents: showCursor ? mouseEvents : [],
         }),
       });
       if (!res.body) throw new Error("no response body");
@@ -399,6 +906,68 @@ const ScreenDemoEditor: React.FC<{
 
   const captureRunning = captureState.kind === "capturing";
 
+  const startExport = async () => {
+    if (!props.src) return;
+    setExportState({ kind: "capturing", stage: "starting", progress: 0 });
+    try {
+      const res = await fetch("/api/render-screen-demo", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          props,
+          fps: FPS,
+          duration: durationSec,
+        }),
+      });
+      if (!res.body) throw new Error("no response body");
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let nl: number;
+        while ((nl = buffer.indexOf("\n")) >= 0) {
+          const line = buffer.slice(0, nl).trim();
+          buffer = buffer.slice(nl + 1);
+          if (!line) continue;
+          try {
+            const ev = JSON.parse(line);
+            if (ev.type === "stage") {
+              setExportState({
+                kind: "capturing",
+                stage: ev.stage,
+                progress: 0,
+              });
+            } else if (ev.type === "progress") {
+              setExportState({
+                kind: "capturing",
+                stage: "rendering",
+                progress: ev.progress ?? 0,
+              });
+            } else if (ev.type === "done") {
+              setExportState({
+                kind: "done",
+                output: ev.output,
+                size: ev.size,
+              });
+              onCaptureComplete();
+            } else if (ev.type === "error") {
+              setExportState({ kind: "error", message: ev.message });
+            }
+          } catch {
+            // skip malformed lines
+          }
+        }
+      }
+    } catch (err) {
+      setExportState({ kind: "error", message: (err as Error).message });
+    }
+  };
+
+  const exportRunning = exportState.kind === "capturing";
+
   const kfLabelStyle: React.CSSProperties = {
     color: "#8b8b94",
     fontSize: 10,
@@ -421,16 +990,20 @@ const ScreenDemoEditor: React.FC<{
     <div
       style={{
         display: "grid",
-        gridTemplateColumns: "220px 1fr 380px",
+        gridTemplateColumns: "220px 1fr 340px",
+        gridTemplateRows: "auto 1fr auto",
         height: "100%",
         minHeight: 0,
+        overflow: "hidden",
       }}
     >
+      {/* Left sidebar — spans all rows */}
       <div
         style={{
           display: "flex",
           flexDirection: "column",
-          height: "100%",
+          gridRow: "1 / -1",
+          minHeight: 0,
           background: "#101014",
           borderRight: "1px solid #1e1e24",
         }}
@@ -441,23 +1014,29 @@ const ScreenDemoEditor: React.FC<{
             alignItems: "center",
             padding: "10px 12px",
             borderBottom: "1px solid #1e1e24",
+            flexShrink: 0,
           }}
         >
           <strong style={{ fontSize: 13 }}>Captures</strong>
         </div>
-        <div style={{ overflowY: "auto", padding: 10, flex: 1 }}>
+        <div style={{ overflowY: "auto", padding: 10, flex: 1, minHeight: 0 }}>
           <CaptureList
             selected={props.src}
             onSelect={(src) => setProps((p) => ({ ...p, src }))}
+            onDelete={(name) => {
+              if (props.src === name) setProps((p) => ({ ...p, src: "" }));
+              onCaptureComplete();
+            }}
             refreshKey={captureRefreshKey}
           />
         </div>
       </div>
+
+      {/* Center — toolbar (row 1) */}
       <div
         style={{
-          display: "flex",
-          flexDirection: "column",
-          minWidth: 0,
+          gridColumn: 2,
+          gridRow: 1,
           background: "#070708",
         }}
       >
@@ -477,7 +1056,7 @@ const ScreenDemoEditor: React.FC<{
             <input
               value={props.sourceUrl}
               onChange={(e) =>
-                setProps((p) => ({ ...p, sourceUrl: e.target.value }))
+                setProps((p) => ({ ...p, sourceUrl: e.target.value }), "url")
               }
               style={{
                 background: "#0c0c10",
@@ -560,35 +1139,188 @@ const ScreenDemoEditor: React.FC<{
               Error
             </span>
           )}
+          <button
+            onClick={startExport}
+            disabled={exportRunning || !props.src}
+            style={{
+              background: exportRunning
+                ? "#3a3a44"
+                : !props.src
+                  ? "#1a1a22"
+                  : "#16a34a",
+              color: !props.src ? "#5a5a64" : "white",
+              border: "none",
+              padding: "8px 14px",
+              borderRadius: 8,
+              cursor: exportRunning || !props.src ? "default" : "pointer",
+              fontWeight: 600,
+              fontSize: 12,
+            }}
+            title={
+              !props.src
+                ? "Capture a page first"
+                : "Render composition to media pool"
+            }
+          >
+            {exportRunning
+              ? `Exporting ${Math.round((exportState as { progress: number }).progress * 100)}%`
+              : "Export to Media"}
+          </button>
+          {exportState.kind === "done" && (
+            <span style={{ color: "#4ade80", fontSize: 12 }}>
+              {((exportState.size as number) / 1024 / 1024).toFixed(1)} MB
+            </span>
+          )}
+          {exportState.kind === "error" && (
+            <span
+              style={{ color: "#ff7a75", fontSize: 12, maxWidth: 200 }}
+              title={(exportState as { message: string }).message}
+            >
+              Export error
+            </span>
+          )}
+          <div style={{ marginLeft: "auto", display: "flex", gap: 4 }}>
+            <button
+              onClick={() => setShowCursor((v) => !v)}
+              style={{
+                background: showCursor ? "#4a6aa8" : "#2a2a34",
+                color: showCursor ? "#fff" : "#8b8b94",
+                border: "none",
+                padding: "6px 12px",
+                borderRadius: 6,
+                cursor: "pointer",
+                fontWeight: 600,
+                fontSize: 11,
+              }}
+              title="Show cursor preview and include cursor in capture"
+            >
+              Cursor
+            </button>
+            <button
+              onClick={() => setOverscan((o) => !o)}
+              style={{
+                background: overscan ? "#4a6aa8" : "#2a2a34",
+                color: overscan ? "#fff" : "#8b8b94",
+                border: "none",
+                padding: "6px 12px",
+                borderRadius: 6,
+                cursor: "pointer",
+                fontWeight: 600,
+                fontSize: 11,
+              }}
+              title="Show area outside the viewport"
+            >
+              Overscan
+            </button>
+          </div>
         </div>
+      </div>
+
+      {/* Center — player (row 2) */}
+      <div
+        style={{
+          gridColumn: 2,
+          gridRow: 2,
+          minHeight: 0,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          padding: 16,
+          background: "#070708",
+        }}
+      >
         <div
           style={{
-            flex: 1,
-            minHeight: 0,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            padding: 16,
+            position: "relative",
+            width: "100%",
+            maxHeight: "100%",
+            aspectRatio: `${overscan ? OVERSCAN_W : WIDTH} / ${overscan ? OVERSCAN_H : HEIGHT}`,
           }}
         >
           <Player
             ref={playerRef}
-            component={ScreenDemo}
+            component={overscan ? OverscanScreenDemo : ScreenDemo}
             inputProps={props}
             durationInFrames={durationInFrames}
-            compositionWidth={WIDTH}
-            compositionHeight={HEIGHT}
+            compositionWidth={overscan ? OVERSCAN_W : WIDTH}
+            compositionHeight={overscan ? OVERSCAN_H : HEIGHT}
             fps={FPS}
             controls
-            style={{ width: "100%", maxHeight: "100%" }}
+            style={{
+              position: "absolute",
+              inset: 0,
+              width: "100%",
+              height: "100%",
+            }}
             acknowledgeRemotionLicense
           />
+          {showCursor && cursorAtFrame && (
+            <div
+              style={{
+                position: "absolute",
+                left: `${((overscan ? (OVERSCAN_W - WIDTH) / 2 + cursorAtFrame.x : cursorAtFrame.x) / (overscan ? OVERSCAN_W : WIDTH)) * 100}%`,
+                top: `${((overscan ? (OVERSCAN_H - HEIGHT) / 2 + cursorAtFrame.y : cursorAtFrame.y) / (overscan ? OVERSCAN_H : HEIGHT)) * 100}%`,
+                pointerEvents: "none",
+                zIndex: 10,
+                transform: "translate(-2px, -2px)",
+              }}
+            >
+              {CURSOR_SVG}
+              {cursorAtFrame.clicking && (
+                <div
+                  style={{
+                    position: "absolute",
+                    top: 2,
+                    left: 2,
+                    width: 24,
+                    height: 24,
+                    borderRadius: "50%",
+                    border: "2px solid rgba(245,158,11,0.7)",
+                    transform: "translate(-50%, -50%)",
+                  }}
+                />
+              )}
+            </div>
+          )}
         </div>
       </div>
+
+      {/* Center — timeline (row 3) */}
+      <ScreenDemoTimeline
+        currentFrame={currentFrame}
+        totalFrames={durationInFrames}
+        fps={FPS}
+        keyframes={props.keyframes}
+        mouseEvents={mouseEvents}
+        onSeek={(f) => playerRef.current?.seekTo(f)}
+        onKeyframeFrame={(idx, frame) =>
+          setProps(
+            (prev) => ({
+              ...prev,
+              keyframes: prev.keyframes.map((kf, i) =>
+                i === idx ? { ...kf, frame } : kf,
+              ),
+            }),
+            `drag-kf-${idx}`,
+          )
+        }
+        onMouseEventFrame={(idx, frame) =>
+          setMouseEvents(
+            (prev) =>
+              prev.map((ev, i) => (i === idx ? { ...ev, frame } : ev)),
+            `drag-me-${idx}`,
+          )
+        }
+      />
+
+      {/* Right sidebar — spans all rows */}
       <div
         style={{
+          gridColumn: 3,
+          gridRow: "1 / -1",
           borderLeft: "1px solid #1e1e24",
           overflowY: "auto",
+          minHeight: 0,
           background: "#101014",
           padding: 12,
         }}
@@ -679,7 +1411,7 @@ const ScreenDemoEditor: React.FC<{
                     value={kf[key]}
                     step={key === "scale" ? 0.05 : key === "frame" ? 1 : 10}
                     onChange={(e) =>
-                      updateKeyframe(i, { [key]: Number(e.target.value) })
+                      updateKeyframe(i, { [key]: Number(e.target.value) }, `kf-${i}-${key}`)
                     }
                     style={kfInputStyle}
                   />
@@ -699,7 +1431,7 @@ const ScreenDemoEditor: React.FC<{
             <input
               value={props.background}
               onChange={(e) =>
-                setProps((p) => ({ ...p, background: e.target.value }))
+                setProps((p) => ({ ...p, background: e.target.value }), "bg")
               }
               style={{ ...kfInputStyle, width: "100%" }}
             />
@@ -716,7 +1448,7 @@ const ScreenDemoEditor: React.FC<{
                   setProps((p) => ({
                     ...p,
                     screenRadius: Number(e.target.value),
-                  }))
+                  }), "radius")
                 }
                 style={kfInputStyle}
               />
@@ -726,12 +1458,154 @@ const ScreenDemoEditor: React.FC<{
               <input
                 value={props.screenShadow}
                 onChange={(e) =>
-                  setProps((p) => ({ ...p, screenShadow: e.target.value }))
+                  setProps((p) => ({ ...p, screenShadow: e.target.value }), "shadow")
                 }
                 style={{ ...kfInputStyle, width: "100%" }}
               />
             </div>
           </div>
+        </div>
+        <div style={{ marginTop: 16 }}>
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              marginBottom: 10,
+            }}
+          >
+            <strong style={{ color: "#e8e8ea", fontSize: 14 }}>
+              Mouse Events
+            </strong>
+            <button
+              onClick={() => {
+                const last = mouseEvents[mouseEvents.length - 1];
+                setMouseEvents((prev) => [
+                  ...prev,
+                  {
+                    frame: (last?.frame ?? 0) + 30,
+                    type: "move",
+                    x: last?.x ?? Math.round(WIDTH / 2),
+                    y: last?.y ?? Math.round(HEIGHT / 2),
+                  },
+                ]);
+              }}
+              style={{
+                background: "#2a2a34",
+                color: "#e8e8ea",
+                border: "1px solid #3a3a44",
+                borderRadius: 6,
+                padding: "4px 10px",
+                cursor: "pointer",
+                fontSize: 11,
+              }}
+            >
+              + Add
+            </button>
+          </div>
+          {mouseEvents.length === 0 && (
+            <div style={{ color: "#5a5a64", fontSize: 12 }}>
+              No mouse events. Add one to show a cursor during capture.
+            </div>
+          )}
+          {mouseEvents.map((ev, i) => (
+            <div
+              key={i}
+              style={{
+                background: "#1a1a22",
+                borderRadius: 8,
+                padding: 10,
+                marginBottom: 8,
+                border: "1px solid #2e2e34",
+              }}
+            >
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  marginBottom: 8,
+                }}
+              >
+                <select
+                  value={ev.type}
+                  onChange={(e) =>
+                    setMouseEvents(
+                      (prev) =>
+                        prev.map((m, j) =>
+                          j === i
+                            ? { ...m, type: e.target.value as "move" | "click" }
+                            : m,
+                        ),
+                      `me-${i}-type`,
+                    )
+                  }
+                  style={{
+                    background: "#0c0c10",
+                    border: "1px solid #2e2e34",
+                    borderRadius: 4,
+                    color: ev.type === "click" ? "#f59e0b" : "#e8e8ea",
+                    padding: "3px 6px",
+                    fontSize: 12,
+                  }}
+                >
+                  <option value="move">Move</option>
+                  <option value="click">Click</option>
+                </select>
+                <button
+                  onClick={() =>
+                    setMouseEvents((prev) => prev.filter((_, j) => j !== i))
+                  }
+                  style={{
+                    background: "none",
+                    border: "none",
+                    color: "#ff7a75",
+                    cursor: "pointer",
+                    fontSize: 11,
+                    padding: "2px 6px",
+                  }}
+                >
+                  Remove
+                </button>
+              </div>
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "1fr 1fr 1fr",
+                  gap: 6,
+                }}
+              >
+                {(
+                  [
+                    ["frame", "Frame"],
+                    ["x", "X"],
+                    ["y", "Y"],
+                  ] as const
+                ).map(([key, label]) => (
+                  <div key={key}>
+                    <div style={kfLabelStyle}>{label}</div>
+                    <input
+                      type="number"
+                      value={ev[key]}
+                      step={key === "frame" ? 1 : 10}
+                      onChange={(e) =>
+                        setMouseEvents(
+                          (prev) =>
+                            prev.map((m, j) =>
+                              j === i
+                                ? { ...m, [key]: Number(e.target.value) }
+                                : m,
+                            ),
+                          `me-${i}-${key}`,
+                        )
+                      }
+                      style={kfInputStyle}
+                    />
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
         </div>
       </div>
     </div>
@@ -754,6 +1628,7 @@ const EditorInner: React.FC<{
   const [newProjectDialog, setNewProjectDialog] = useState(false);
   const [newProjectName, setNewProjectName] = useState("");
   const [projectName, setProjectName] = useState(initial.projectName ?? "");
+  const [overscan, setOverscan] = useState(false);
   const playerRef = React.useRef<PlayerRef>(null);
   const rightPanelRef = React.useRef<HTMLDivElement>(null);
 
@@ -1377,6 +2252,7 @@ const EditorInner: React.FC<{
         <MediaPool
           usedSources={usedSources}
           onAdd={addClipFromAsset}
+          onDelete={() => setAssetRefreshKey((k) => k + 1)}
           reloadKey={assetRefreshKey + externalReloadKey}
         />
       </div>
@@ -1461,6 +2337,23 @@ const EditorInner: React.FC<{
           >
             {saveMsg}
           </span>
+          <button
+            onClick={() => setOverscan((o) => !o)}
+            style={{
+              background: overscan ? "#4a6aa8" : "#2a2a34",
+              color: overscan ? "#fff" : "#8b8b94",
+              border: "none",
+              padding: "6px 12px",
+              borderRadius: 6,
+              cursor: "pointer",
+              fontWeight: 600,
+              fontSize: 11,
+              marginLeft: "auto",
+            }}
+            title="Show area outside the viewport"
+          >
+            Overscan
+          </button>
         </div>
         <div
           style={{
@@ -1474,11 +2367,11 @@ const EditorInner: React.FC<{
         >
           <Player
             ref={playerRef}
-            component={MyComposition}
+            component={overscan ? OverscanMyComposition : MyComposition}
             inputProps={state}
             durationInFrames={durationInFrames}
-            compositionWidth={WIDTH}
-            compositionHeight={HEIGHT}
+            compositionWidth={overscan ? OVERSCAN_W : WIDTH}
+            compositionHeight={overscan ? OVERSCAN_H : HEIGHT}
             fps={FPS}
             controls
             style={{ width: "100%", maxHeight: "100%" }}

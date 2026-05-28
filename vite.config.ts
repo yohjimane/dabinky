@@ -416,6 +416,7 @@ export default defineConfig({
       input: {
         index: path.join(repoRoot, "editor/index.html"),
         chunkRender: path.join(repoRoot, "editor/chunk-render.html"),
+        screenDemoRender: path.join(repoRoot, "editor/screen-demo-render.html"),
       },
     },
   },
@@ -1260,6 +1261,43 @@ function attachDabinkyMiddlewares(
             );
           }
         });
+        server.middlewares.use("/api/delete-asset", (req, res) => {
+          if (req.method !== "POST") {
+            res.statusCode = 405;
+            res.end("method not allowed");
+            return;
+          }
+          let body = "";
+          req.on("data", (c: string) => {
+            body += c;
+          });
+          req.on("end", () => {
+            try {
+              const { name } = JSON.parse(body) as { name: string };
+              if (!name || name.includes("..")) {
+                res.statusCode = 400;
+                res.end(JSON.stringify({ ok: false, error: "invalid name" }));
+                return;
+              }
+              const abs = name.startsWith("media/")
+                ? path.join(mediaDir, path.basename(name.replace(/^media\//, "")))
+                : path.join(publicDir, path.basename(name));
+              if (fs.existsSync(abs)) {
+                fs.unlinkSync(abs);
+              }
+              res.setHeader("content-type", "application/json");
+              res.end(JSON.stringify({ ok: true }));
+            } catch (err) {
+              res.statusCode = 500;
+              res.end(
+                JSON.stringify({
+                  ok: false,
+                  error: (err as Error).message,
+                }),
+              );
+            }
+          });
+        });
         server.middlewares.use("/api/clear-media", (req, res) => {
           if (req.method !== "POST") {
             res.statusCode = 405;
@@ -1920,6 +1958,194 @@ function attachDabinkyMiddlewares(
           });
         });
 
+        server.middlewares.use("/api/render-screen-demo", (req, res) => {
+          if (req.method !== "POST") {
+            res.statusCode = 405;
+            res.end("method not allowed");
+            return;
+          }
+          let body = "";
+          req.on("data", (c) => {
+            body += c;
+          });
+          req.on("end", async () => {
+            res.setHeader("content-type", "application/x-ndjson");
+            res.setHeader("cache-control", "no-cache");
+            res.setHeader("x-accel-buffering", "no");
+            const emit = (obj: Record<string, unknown>) => {
+              if (!res.writableEnded) res.write(JSON.stringify(obj) + "\n");
+            };
+
+            let browser: Awaited<
+              ReturnType<typeof import("playwright").chromium.launch>
+            > | null = null;
+            let renderFfmpeg: ReturnType<typeof spawn> | null = null;
+            let aborted = false;
+            const frameDir = path.join(
+              os.tmpdir(),
+              `dabinky-sd-render-${Date.now()}`,
+            );
+
+            res.on("close", () => {
+              if (res.writableFinished) return;
+              aborted = true;
+              void browser?.close().catch(() => {});
+              if (renderFfmpeg && renderFfmpeg.exitCode === null) {
+                try {
+                  renderFfmpeg.kill("SIGKILL");
+                } catch {
+                  /* ignore */
+                }
+              }
+            });
+
+            try {
+              const parsed = body ? JSON.parse(body) : {};
+              const props = parsed.props;
+              const captureFps = Math.max(1, Number(parsed.fps ?? 60));
+              const durationSec = Math.max(0.1, Number(parsed.duration ?? 12));
+              const totalFrames = Math.ceil(captureFps * durationSec);
+              const defaultName = (() => {
+                const d = new Date();
+                const pad = (n: number) => String(n).padStart(2, "0");
+                return `screen-demo-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}.mp4`;
+              })();
+              const outputName = String(
+                parsed.output || defaultName,
+              ).replace(/^media\//, "");
+              ensureMediaDir();
+              const outputAbs = path.join(
+                mediaDir,
+                path.basename(outputName),
+              );
+
+              fs.mkdirSync(frameDir, { recursive: true });
+
+              emit({ type: "stage", stage: "launching-browser" });
+
+              const playwright = await import("playwright");
+              browser = await playwright.chromium.launch({ headless: true });
+              const context = await browser.newContext({
+                viewport: { width: 1920, height: 1080 },
+                deviceScaleFactor: 1,
+              });
+              const page = await context.newPage();
+
+              emit({ type: "stage", stage: "loading-composition" });
+              const renderUrl = `http://localhost:${
+                (server as import("vite").ViteDevServer).config?.server?.port ??
+                5180
+              }/screen-demo-render.html`;
+              await page.goto(renderUrl, { waitUntil: "networkidle" });
+
+              await page.waitForFunction(
+                () => (window as any).__renderReady === true,
+                { timeout: 15000 },
+              );
+
+              await page.evaluate(
+                ({ p, d }) => {
+                  (window as any).__initRender(p, d);
+                },
+                { p: props, d: totalFrames },
+              );
+
+              await page.waitForTimeout(500);
+              if (aborted) return;
+
+              emit({
+                type: "stage",
+                stage: "rendering",
+                totalFrames,
+                fps: captureFps,
+              });
+
+              for (let i = 0; i < totalFrames; i++) {
+                if (aborted) return;
+                await page.evaluate(
+                  (f) => (window as any).__seekTo(f),
+                  i,
+                );
+                await page.waitForTimeout(16);
+                const padded = String(i).padStart(5, "0");
+                await page.screenshot({
+                  path: path.join(frameDir, `frame_${padded}.png`),
+                });
+                if (i % 30 === 0) {
+                  emit({
+                    type: "progress",
+                    frame: i,
+                    totalFrames,
+                    progress: i / totalFrames,
+                  });
+                }
+              }
+
+              await browser.close();
+              browser = null;
+              if (aborted) return;
+
+              emit({ type: "stage", stage: "encoding" });
+              await new Promise<void>((resolve, reject) => {
+                renderFfmpeg = spawn(
+                  ffmpegPath,
+                  [
+                    "-y",
+                    "-framerate",
+                    String(captureFps),
+                    "-i",
+                    path.join(frameDir, "frame_%05d.png"),
+                    "-c:v",
+                    "libx264",
+                    "-crf",
+                    "18",
+                    "-preset",
+                    "medium",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-movflags",
+                    "+faststart",
+                    outputAbs,
+                  ],
+                  { stdio: ["ignore", "ignore", "pipe"] },
+                );
+                activeFfmpegs.add(renderFfmpeg);
+                renderFfmpeg.on("close", (code) => {
+                  activeFfmpegs.delete(renderFfmpeg!);
+                  renderFfmpeg = null;
+                  if (code === 0) resolve();
+                  else
+                    reject(
+                      new Error(`ffmpeg encode exited with ${code}`),
+                    );
+                });
+                renderFfmpeg.on("error", (err) => {
+                  activeFfmpegs.delete(renderFfmpeg!);
+                  renderFfmpeg = null;
+                  reject(err);
+                });
+              });
+
+              fs.rmSync(frameDir, { recursive: true, force: true });
+              if (aborted) return;
+
+              const stat = fs.statSync(outputAbs);
+              emit({
+                type: "done",
+                output: `media/${path.basename(outputAbs)}`,
+                size: stat.size,
+              });
+              if (!res.writableEnded) res.end();
+            } catch (err) {
+              emit({ type: "error", message: (err as Error).message });
+              if (!res.writableEnded) res.end();
+            } finally {
+              void browser?.close().catch(() => {});
+              fs.rmSync(frameDir, { recursive: true, force: true });
+            }
+          });
+        });
+
         server.middlewares.use("/api/capture-page", (req, res) => {
           if (req.method !== "POST") {
             res.statusCode = 405;
@@ -1984,6 +2210,17 @@ function attachDabinkyMiddlewares(
 
               const totalFrames = Math.ceil(captureFps * duration);
               const frameMs = 1000 / captureFps;
+              const mouseEvents: {
+                frame: number;
+                type: "move" | "click";
+                x: number;
+                y: number;
+              }[] = Array.isArray(parsed.mouseEvents)
+                ? (parsed.mouseEvents as typeof mouseEvents)
+                    .slice()
+                    .sort((a, b) => a.frame - b.frame)
+                : [];
+              const hasMouseEvents = mouseEvents.length > 0;
 
               fs.mkdirSync(frameDir, { recursive: true });
 
@@ -2030,6 +2267,33 @@ function attachDabinkyMiddlewares(
               const cdp = await context.newCDPSession(page);
               await cdp.send("Input.setIgnoreInputEvents", { ignore: true });
 
+              if (hasMouseEvents) {
+                await page.evaluate(() => {
+                  const cursor = document.createElement("div");
+                  cursor.id = "__dabinky-cursor";
+                  cursor.style.cssText =
+                    "position:fixed;top:0;left:0;pointer-events:none;z-index:999999;opacity:0;";
+                  cursor.innerHTML = `<svg width="24" height="24" viewBox="0 0 24 24" fill="none">
+                    <path d="M5.5 3.2l12.8 7.3-5.3 1.7-3.7 5.5z" fill="#fff" stroke="#111" stroke-width="1.2" stroke-linejoin="round"/>
+                  </svg>`;
+                  document.body.appendChild(cursor);
+
+                  const ripple = document.createElement("div");
+                  ripple.id = "__dabinky-ripple";
+                  ripple.style.cssText =
+                    "position:fixed;pointer-events:none;z-index:999998;width:36px;height:36px;border-radius:50%;border:2px solid rgba(255,255,255,0.7);opacity:0;transform:translate(-50%,-50%) scale(0);";
+                  document.body.appendChild(ripple);
+
+                  (window as any).__cursorState = {
+                    x: 0,
+                    y: 0,
+                    clickFrame: -999,
+                    clickX: 0,
+                    clickY: 0,
+                  };
+                });
+              }
+
               for (let i = 0; i < 10; i++) {
                 await page.evaluate(() =>
                   (window as unknown as { __stepTime: () => void }).__stepTime(),
@@ -2058,6 +2322,88 @@ function attachDabinkyMiddlewares(
                     }
                   ).__capture?.stepFrame(),
                 );
+
+                if (hasMouseEvents) {
+                  let curX: number | null = null;
+                  let curY: number | null = null;
+                  let isClick = false;
+
+                  const exact = mouseEvents.find((e) => e.frame === i);
+                  if (exact) {
+                    curX = exact.x;
+                    curY = exact.y;
+                    isClick = exact.type === "click";
+                  } else {
+                    const before = mouseEvents
+                      .filter((e) => e.frame <= i)
+                      .at(-1);
+                    const after = mouseEvents.find((e) => e.frame > i);
+                    if (before && after) {
+                      const t =
+                        (i - before.frame) / (after.frame - before.frame);
+                      const ease = t * t * (3 - 2 * t);
+                      curX = before.x + (after.x - before.x) * ease;
+                      curY = before.y + (after.y - before.y) * ease;
+                    } else if (before) {
+                      curX = before.x;
+                      curY = before.y;
+                    }
+                  }
+
+                  if (curX !== null && curY !== null) {
+                    const cx = curX,
+                      cy = curY,
+                      click = isClick,
+                      frame = i;
+                    await page.evaluate(
+                      ({ cx: x, cy: y, click: cl, frame: f }) => {
+                        const s = (window as any).__cursorState;
+                        const cur = document.getElementById(
+                          "__dabinky-cursor",
+                        )!;
+                        const rip = document.getElementById(
+                          "__dabinky-ripple",
+                        )!;
+                        s.x = x;
+                        s.y = y;
+                        cur.style.opacity = "1";
+                        cur.style.transform = `translate(${x}px, ${y}px)`;
+                        if (cl) {
+                          s.clickFrame = f;
+                          s.clickX = x;
+                          s.clickY = y;
+                        }
+                        const elapsed = f - s.clickFrame;
+                        const dur = 18;
+                        if (elapsed >= 0 && elapsed < dur) {
+                          const t = elapsed / dur;
+                          rip.style.left = s.clickX + "px";
+                          rip.style.top = s.clickY + "px";
+                          rip.style.transform = `translate(-50%,-50%) scale(${t})`;
+                          rip.style.opacity = String(1 - t);
+                        } else {
+                          rip.style.opacity = "0";
+                        }
+                      },
+                      { cx, cy, click, frame },
+                    );
+
+                    await page.evaluate(
+                      ({ x, y, click: cl }) => {
+                        const t = document.elementFromPoint(x, y) || document.body;
+                        const opts = { bubbles: true, cancelable: true, clientX: x, clientY: y, view: window };
+                        t.dispatchEvent(new MouseEvent("mousemove", opts));
+                        if (cl) {
+                          t.dispatchEvent(new MouseEvent("mousedown", { ...opts, button: 0 }));
+                          t.dispatchEvent(new MouseEvent("mouseup", { ...opts, button: 0 }));
+                          t.dispatchEvent(new MouseEvent("click", { ...opts, button: 0 }));
+                        }
+                      },
+                      { x: cx, y: cy, click: isClick },
+                    );
+                  }
+                }
+
                 const padded = String(i).padStart(5, "0");
                 await page.screenshot({
                   path: path.join(frameDir, `frame_${padded}.png`),

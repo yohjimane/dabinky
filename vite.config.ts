@@ -1920,6 +1920,215 @@ function attachDabinkyMiddlewares(
           });
         });
 
+        server.middlewares.use("/api/capture-page", (req, res) => {
+          if (req.method !== "POST") {
+            res.statusCode = 405;
+            res.end("method not allowed");
+            return;
+          }
+          let body = "";
+          req.on("data", (c) => {
+            body += c;
+          });
+          req.on("end", async () => {
+            res.setHeader("content-type", "application/x-ndjson");
+            res.setHeader("cache-control", "no-cache");
+            res.setHeader("x-accel-buffering", "no");
+            const emit = (obj: Record<string, unknown>) => {
+              if (!res.writableEnded) res.write(JSON.stringify(obj) + "\n");
+            };
+
+            let browser: Awaited<
+              ReturnType<typeof import("playwright").chromium.launch>
+            > | null = null;
+            let captureFfmpeg: ReturnType<typeof spawn> | null = null;
+            let aborted = false;
+            const frameDir = path.join(
+              os.tmpdir(),
+              `dabinky-capture-${Date.now()}`,
+            );
+
+            res.on("close", () => {
+              if (res.writableFinished) return;
+              aborted = true;
+              void browser?.close().catch(() => {});
+              if (captureFfmpeg && captureFfmpeg.exitCode === null) {
+                try {
+                  captureFfmpeg.kill("SIGKILL");
+                } catch {
+                  /* ignore */
+                }
+              }
+            });
+
+            try {
+              const parsed = body ? JSON.parse(body) : {};
+              const sourceUrl = String(
+                parsed.sourceUrl || "http://localhost:3001/?capture=true",
+              );
+              const captureFps = Math.max(1, Number(parsed.fps ?? 60));
+              const duration = Math.max(0.1, Number(parsed.duration ?? 12));
+              const width = Math.max(1, Number(parsed.width ?? 1920));
+              const height = Math.max(1, Number(parsed.height ?? 1080));
+              const outputRel = String(
+                parsed.output || "captures/hero.mp4",
+              );
+              const outputAbs = path.join(publicDir, outputRel);
+
+              const totalFrames = Math.ceil(captureFps * duration);
+              const frameMs = 1000 / captureFps;
+
+              fs.mkdirSync(frameDir, { recursive: true });
+              fs.mkdirSync(path.dirname(outputAbs), { recursive: true });
+
+              emit({ type: "stage", stage: "launching-browser" });
+
+              const playwright = await import("playwright");
+              browser = await playwright.chromium.launch({ headless: true });
+              const context = await browser.newContext({
+                viewport: { width, height },
+                deviceScaleFactor: 1,
+              });
+              const page = await context.newPage();
+
+              const virtualTimeScript = `
+(() => {
+    let virtualNow = 0;
+    const FRAME_MS = ${frameMs};
+    performance.now = () => virtualNow;
+    Date.now = () => virtualNow;
+    const rafQueue = [];
+    let rafId = 0;
+    window.requestAnimationFrame = (cb) => { const id = ++rafId; rafQueue.push({ id, cb }); return id; };
+    window.cancelAnimationFrame = (id) => { const idx = rafQueue.findIndex(r => r.id === id); if (idx !== -1) rafQueue.splice(idx, 1); };
+    const timers = [];
+    let timerId = 1000;
+    window.setTimeout = (cb, ms = 0, ...args) => { const id = ++timerId; timers.push({ id, cb, args, fireAt: virtualNow + ms, interval: false }); return id; };
+    window.setInterval = (cb, ms = 0, ...args) => { const id = ++timerId; timers.push({ id, cb, args, fireAt: virtualNow + ms, interval: true, ms }); return id; };
+    window.clearTimeout = (id) => { const idx = timers.findIndex(t => t.id === id); if (idx !== -1) timers.splice(idx, 1); };
+    window.clearInterval = window.clearTimeout;
+    window.__stepTime = () => {
+        virtualNow += FRAME_MS;
+        const due = timers.filter(t => t.fireAt <= virtualNow);
+        for (const t of due) { t.cb(...t.args); if (t.interval) { t.fireAt += t.ms; } else { const idx = timers.indexOf(t); if (idx !== -1) timers.splice(idx, 1); } }
+        const batch = rafQueue.splice(0);
+        for (const { cb } of batch) { try { cb(virtualNow); } catch {} }
+    };
+    window.__virtualNow = () => virtualNow;
+})();`;
+
+              await page.addInitScript(virtualTimeScript);
+              emit({ type: "stage", stage: "loading-page" });
+              await page.goto(sourceUrl, { waitUntil: "networkidle" });
+
+              for (let i = 0; i < 10; i++) {
+                await page.evaluate(() =>
+                  (window as unknown as { __stepTime: () => void }).__stepTime(),
+                );
+              }
+              if (aborted) return;
+
+              emit({
+                type: "stage",
+                stage: "capturing",
+                totalFrames,
+                fps: captureFps,
+                width,
+                height,
+              });
+
+              for (let i = 0; i < totalFrames; i++) {
+                if (aborted) return;
+                await page.evaluate(() =>
+                  (window as unknown as { __stepTime: () => void }).__stepTime(),
+                );
+                await page.evaluate(() =>
+                  (
+                    window as unknown as {
+                      __capture?: { stepFrame: () => void };
+                    }
+                  ).__capture?.stepFrame(),
+                );
+                const padded = String(i).padStart(5, "0");
+                await page.screenshot({
+                  path: path.join(frameDir, `frame_${padded}.png`),
+                });
+                if (i % 30 === 0) {
+                  emit({
+                    type: "progress",
+                    frame: i,
+                    totalFrames,
+                    progress: i / totalFrames,
+                  });
+                }
+              }
+
+              await browser.close();
+              browser = null;
+              if (aborted) return;
+
+              emit({ type: "stage", stage: "encoding" });
+              await new Promise<void>((resolve, reject) => {
+                captureFfmpeg = spawn(
+                  ffmpegPath,
+                  [
+                    "-y",
+                    "-framerate",
+                    String(captureFps),
+                    "-i",
+                    path.join(frameDir, "frame_%05d.png"),
+                    "-c:v",
+                    "libx264",
+                    "-crf",
+                    "18",
+                    "-preset",
+                    "medium",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-movflags",
+                    "+faststart",
+                    outputAbs,
+                  ],
+                  { stdio: ["ignore", "ignore", "pipe"] },
+                );
+                activeFfmpegs.add(captureFfmpeg);
+                captureFfmpeg.on("close", (code) => {
+                  activeFfmpegs.delete(captureFfmpeg!);
+                  captureFfmpeg = null;
+                  if (code === 0) resolve();
+                  else
+                    reject(
+                      new Error(`ffmpeg capture encode exited with ${code}`),
+                    );
+                });
+                captureFfmpeg.on("error", (err) => {
+                  activeFfmpegs.delete(captureFfmpeg!);
+                  captureFfmpeg = null;
+                  reject(err);
+                });
+              });
+
+              const stat = fs.statSync(outputAbs);
+              emit({
+                type: "done",
+                output: outputRel,
+                size: stat.size,
+                totalFrames,
+              });
+            } catch (err) {
+              if (!aborted) {
+                emit({ type: "error", message: (err as Error).message });
+              }
+            } finally {
+              if (browser) await browser.close().catch(() => {});
+              if (fs.existsSync(frameDir)) {
+                fs.rmSync(frameDir, { recursive: true, force: true });
+              }
+              if (!res.writableEnded) res.end();
+            }
+          });
+        });
+
         server.middlewares.use("/api/reveal", (req, res) => {
           if (req.method !== "POST") {
             res.statusCode = 405;

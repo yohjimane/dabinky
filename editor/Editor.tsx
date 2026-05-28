@@ -6,6 +6,8 @@ import {
   Clip,
   TextSegment,
 } from "@src/Composition";
+import { ScreenDemo } from "@src/ScreenDemo";
+import type { ScreenDemoProps } from "@src/ScreenDemo";
 import { useHistory } from "./useHistory";
 import { Timeline, Selection } from "./Timeline";
 import { MediaPool, ASSET_MIME, AssetDragPayload } from "./MediaPool";
@@ -30,7 +32,10 @@ const secs = (n: number) => Math.round(n * 1000) / 1000;
 const newTrackId = (prefix: string) =>
   `${prefix}${Date.now().toString(36).slice(-5)}`;
 
+type EditorMode = "timeline" | "screen-demo";
+
 export const Editor: React.FC = () => {
+  const [mode, setMode] = useState<EditorMode>("timeline");
   const [loaded, setLoaded] = useState<MyCompositionProps | null>(null);
   const [initStatus, setInitStatus] = useState("Loading composition…");
 
@@ -75,10 +80,479 @@ export const Editor: React.FC = () => {
     })();
   }, []);
 
-  if (!loaded) {
+  const tabStyle = (active: boolean): React.CSSProperties => ({
+    background: active ? "#2a2a34" : "transparent",
+    color: active ? "#fff" : "#70707a",
+    border: "none",
+    padding: "6px 14px",
+    borderRadius: 6,
+    cursor: "pointer",
+    fontWeight: active ? 600 : 400,
+    fontSize: 13,
+  });
+
+  if (!loaded && mode === "timeline") {
     return <div style={{ padding: 40 }}>{initStatus}</div>;
   }
-  return <EditorInner initial={loaded} />;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", height: "100vh" }}>
+      <div
+        style={{
+          display: "flex",
+          gap: 4,
+          padding: "6px 12px",
+          background: "#0c0c10",
+          borderBottom: "1px solid #1e1e24",
+        }}
+      >
+        <button
+          style={tabStyle(mode === "timeline")}
+          onClick={() => setMode("timeline")}
+        >
+          Timeline
+        </button>
+        <button
+          style={tabStyle(mode === "screen-demo")}
+          onClick={() => setMode("screen-demo")}
+        >
+          Screen Demo
+        </button>
+      </div>
+      <div style={{ flex: 1, minHeight: 0 }}>
+        {mode === "timeline" && loaded && <EditorInner initial={loaded} />}
+        {mode === "screen-demo" && <ScreenDemoEditor />}
+      </div>
+    </div>
+  );
+};
+
+const DEFAULT_SCREEN_DEMO_PROPS: ScreenDemoProps = {
+  src: "captures/hero.mp4",
+  sourceUrl: "http://localhost:3001/?capture=true",
+  background: "linear-gradient(135deg, #0f172a 0%, #1e293b 100%)",
+  screenRadius: 12,
+  screenShadow: "0 40px 80px rgba(0,0,0,0.5)",
+  keyframes: [
+    { frame: 0, scale: 0.75, x: 0, y: 0, rotateY: 2, rotateX: 0 },
+    { frame: 90, scale: 0.75, x: 0, y: 0, rotateY: 0, rotateX: 0 },
+    { frame: 180, scale: 1.4, x: -200, y: -80, rotateY: 0, rotateX: 0 },
+    { frame: 360, scale: 1.4, x: -200, y: -80, rotateY: 0, rotateX: 0 },
+    { frame: 420, scale: 1.2, x: 250, y: -60, rotateY: 0, rotateX: 0 },
+    { frame: 600, scale: 1.2, x: 250, y: -60, rotateY: 0, rotateX: 0 },
+    { frame: 660, scale: 0.75, x: 0, y: 0, rotateY: -2, rotateX: 1 },
+  ],
+};
+
+type CaptureState =
+  | { kind: "idle" }
+  | { kind: "capturing"; stage: string; progress: number }
+  | { kind: "done"; output: string; size: number }
+  | { kind: "error"; message: string };
+
+const ScreenDemoEditor: React.FC = () => {
+  const [props, setProps] = useState<ScreenDemoProps>(DEFAULT_SCREEN_DEMO_PROPS);
+  const [durationSec, setDurationSec] = useState(12);
+  const [captureState, setCaptureState] = useState<CaptureState>({
+    kind: "idle",
+  });
+  const playerRef = React.useRef<PlayerRef>(null);
+
+  const durationInFrames = Math.max(1, Math.ceil(durationSec * FPS));
+
+  const updateKeyframe = (
+    idx: number,
+    patch: Partial<ScreenDemoProps["keyframes"][number]>,
+  ) => {
+    setProps((prev) => ({
+      ...prev,
+      keyframes: prev.keyframes.map((kf, i) =>
+        i === idx ? { ...kf, ...patch } : kf,
+      ),
+    }));
+  };
+
+  const addKeyframe = () => {
+    const last = props.keyframes[props.keyframes.length - 1];
+    setProps((prev) => ({
+      ...prev,
+      keyframes: [
+        ...prev.keyframes,
+        {
+          frame: (last?.frame ?? 0) + 60,
+          scale: last?.scale ?? 1,
+          x: last?.x ?? 0,
+          y: last?.y ?? 0,
+          rotateY: last?.rotateY ?? 0,
+          rotateX: last?.rotateX ?? 0,
+        },
+      ],
+    }));
+  };
+
+  const removeKeyframe = (idx: number) => {
+    if (props.keyframes.length <= 1) return;
+    setProps((prev) => ({
+      ...prev,
+      keyframes: prev.keyframes.filter((_, i) => i !== idx),
+    }));
+  };
+
+  const startCapture = async () => {
+    setCaptureState({ kind: "capturing", stage: "starting", progress: 0 });
+    try {
+      const res = await fetch("/api/capture-page", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          sourceUrl: props.sourceUrl,
+          fps: FPS,
+          duration: durationSec,
+          width: WIDTH,
+          height: HEIGHT,
+          output: props.src,
+        }),
+      });
+      if (!res.body) throw new Error("no response body");
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let nl: number;
+        while ((nl = buffer.indexOf("\n")) >= 0) {
+          const line = buffer.slice(0, nl).trim();
+          buffer = buffer.slice(nl + 1);
+          if (!line) continue;
+          try {
+            const ev = JSON.parse(line);
+            if (ev.type === "stage") {
+              setCaptureState({
+                kind: "capturing",
+                stage: ev.stage,
+                progress: 0,
+              });
+            } else if (ev.type === "progress") {
+              setCaptureState({
+                kind: "capturing",
+                stage: "capturing",
+                progress: ev.progress ?? 0,
+              });
+            } else if (ev.type === "done") {
+              setCaptureState({
+                kind: "done",
+                output: ev.output,
+                size: ev.size,
+              });
+            } else if (ev.type === "error") {
+              setCaptureState({ kind: "error", message: ev.message });
+            }
+          } catch {
+            // skip malformed lines
+          }
+        }
+      }
+    } catch (err) {
+      setCaptureState({ kind: "error", message: (err as Error).message });
+    }
+  };
+
+  const captureRunning = captureState.kind === "capturing";
+
+  const kfLabelStyle: React.CSSProperties = {
+    color: "#8b8b94",
+    fontSize: 10,
+    textTransform: "uppercase",
+    letterSpacing: 0.5,
+  };
+
+  const kfInputStyle: React.CSSProperties = {
+    background: "#0c0c10",
+    border: "1px solid #2e2e34",
+    borderRadius: 4,
+    color: "#e8e8ea",
+    padding: "4px 6px",
+    width: 60,
+    fontSize: 12,
+    textAlign: "center",
+  };
+
+  return (
+    <div
+      style={{
+        display: "grid",
+        gridTemplateColumns: "1fr 380px",
+        height: "100%",
+        minHeight: 0,
+      }}
+    >
+      <div
+        style={{
+          display: "flex",
+          flexDirection: "column",
+          minWidth: 0,
+          background: "#070708",
+        }}
+      >
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            padding: "10px 16px",
+            borderBottom: "1px solid #1e1e24",
+          }}
+        >
+          <strong style={{ marginRight: "auto" }}>Screen Demo</strong>
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <label style={{ color: "#8b8b94", fontSize: 12 }}>Source URL</label>
+            <input
+              value={props.sourceUrl}
+              onChange={(e) =>
+                setProps((p) => ({ ...p, sourceUrl: e.target.value }))
+              }
+              style={{
+                background: "#0c0c10",
+                border: "1px solid #2e2e34",
+                borderRadius: 6,
+                color: "#e8e8ea",
+                padding: "6px 10px",
+                fontSize: 12,
+                width: 280,
+              }}
+            />
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <label style={{ color: "#8b8b94", fontSize: 12 }}>Duration</label>
+            <input
+              type="number"
+              value={durationSec}
+              min={1}
+              max={120}
+              step={1}
+              onChange={(e) => setDurationSec(Number(e.target.value))}
+              style={{
+                background: "#0c0c10",
+                border: "1px solid #2e2e34",
+                borderRadius: 6,
+                color: "#e8e8ea",
+                padding: "6px 10px",
+                fontSize: 12,
+                width: 50,
+                textAlign: "center",
+              }}
+            />
+            <span style={{ color: "#70707a", fontSize: 11 }}>s</span>
+          </div>
+          <button
+            onClick={startCapture}
+            disabled={captureRunning}
+            style={{
+              background: captureRunning ? "#3a3a44" : "#2563eb",
+              color: "white",
+              border: "none",
+              padding: "8px 14px",
+              borderRadius: 8,
+              cursor: captureRunning ? "default" : "pointer",
+              fontWeight: 600,
+              fontSize: 12,
+            }}
+          >
+            {captureRunning
+              ? `Capturing ${Math.round((captureState as { progress: number }).progress * 100)}%`
+              : "Capture"}
+          </button>
+          {captureState.kind === "done" && (
+            <span style={{ color: "#4ade80", fontSize: 12 }}>
+              {(captureState.size / 1024 / 1024).toFixed(1)} MB
+            </span>
+          )}
+          {captureState.kind === "error" && (
+            <span
+              style={{ color: "#ff7a75", fontSize: 12, maxWidth: 200 }}
+              title={captureState.message}
+            >
+              Error
+            </span>
+          )}
+        </div>
+        <div
+          style={{
+            flex: 1,
+            minHeight: 0,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: 16,
+          }}
+        >
+          <Player
+            ref={playerRef}
+            component={ScreenDemo}
+            inputProps={props}
+            durationInFrames={durationInFrames}
+            compositionWidth={WIDTH}
+            compositionHeight={HEIGHT}
+            fps={FPS}
+            controls
+            style={{ width: "100%", maxHeight: "100%" }}
+            acknowledgeRemotionLicense
+          />
+        </div>
+      </div>
+      <div
+        style={{
+          borderLeft: "1px solid #1e1e24",
+          overflowY: "auto",
+          background: "#101014",
+          padding: 12,
+        }}
+      >
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            marginBottom: 12,
+          }}
+        >
+          <strong style={{ color: "#e8e8ea", fontSize: 14 }}>Keyframes</strong>
+          <button
+            onClick={addKeyframe}
+            style={{
+              background: "#2a2a34",
+              color: "#e8e8ea",
+              border: "1px solid #3a3a44",
+              borderRadius: 6,
+              padding: "4px 10px",
+              cursor: "pointer",
+              fontSize: 11,
+            }}
+          >
+            + Add
+          </button>
+        </div>
+        {props.keyframes.map((kf, i) => (
+          <div
+            key={i}
+            style={{
+              background: "#1a1a22",
+              borderRadius: 8,
+              padding: 10,
+              marginBottom: 8,
+              border: "1px solid #2e2e34",
+            }}
+          >
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                marginBottom: 8,
+              }}
+            >
+              <span style={{ color: "#e8e8ea", fontSize: 12, fontWeight: 600 }}>
+                #{i + 1} — frame {kf.frame}
+              </span>
+              {props.keyframes.length > 1 && (
+                <button
+                  onClick={() => removeKeyframe(i)}
+                  style={{
+                    background: "none",
+                    border: "none",
+                    color: "#ff7a75",
+                    cursor: "pointer",
+                    fontSize: 11,
+                    padding: "2px 6px",
+                  }}
+                >
+                  Remove
+                </button>
+              )}
+            </div>
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "repeat(3, 1fr)",
+                gap: 6,
+              }}
+            >
+              {(
+                [
+                  ["frame", "Frame"],
+                  ["scale", "Scale"],
+                  ["x", "X"],
+                  ["y", "Y"],
+                  ["rotateX", "Rot X"],
+                  ["rotateY", "Rot Y"],
+                ] as const
+              ).map(([key, label]) => (
+                <div key={key}>
+                  <div style={kfLabelStyle}>{label}</div>
+                  <input
+                    type="number"
+                    value={kf[key]}
+                    step={key === "scale" ? 0.05 : key === "frame" ? 1 : 10}
+                    onChange={(e) =>
+                      updateKeyframe(i, { [key]: Number(e.target.value) })
+                    }
+                    style={kfInputStyle}
+                  />
+                </div>
+              ))}
+            </div>
+          </div>
+        ))}
+        <div style={{ marginTop: 16 }}>
+          <strong
+            style={{ color: "#e8e8ea", fontSize: 14, display: "block", marginBottom: 10 }}
+          >
+            Style
+          </strong>
+          <div style={{ marginBottom: 8 }}>
+            <div style={kfLabelStyle}>Background</div>
+            <input
+              value={props.background}
+              onChange={(e) =>
+                setProps((p) => ({ ...p, background: e.target.value }))
+              }
+              style={{ ...kfInputStyle, width: "100%" }}
+            />
+          </div>
+          <div
+            style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}
+          >
+            <div>
+              <div style={kfLabelStyle}>Radius</div>
+              <input
+                type="number"
+                value={props.screenRadius}
+                onChange={(e) =>
+                  setProps((p) => ({
+                    ...p,
+                    screenRadius: Number(e.target.value),
+                  }))
+                }
+                style={kfInputStyle}
+              />
+            </div>
+            <div>
+              <div style={kfLabelStyle}>Shadow</div>
+              <input
+                value={props.screenShadow}
+                onChange={(e) =>
+                  setProps((p) => ({ ...p, screenShadow: e.target.value }))
+                }
+                style={{ ...kfInputStyle, width: "100%" }}
+              />
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
 };
 
 const EditorInner: React.FC<{ initial: MyCompositionProps }> = ({
@@ -711,7 +1185,7 @@ const EditorInner: React.FC<{ initial: MyCompositionProps }> = ({
         display: "grid",
         gridTemplateColumns: "260px 1fr 460px",
         gridTemplateRows: "1fr auto",
-        height: "100vh",
+        height: "100%",
         minHeight: 0,
       }}
     >

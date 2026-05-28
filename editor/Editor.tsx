@@ -11,6 +11,7 @@ import type { ScreenDemoProps } from "@src/ScreenDemo";
 import { useHistory } from "./useHistory";
 import { Timeline, Selection } from "./Timeline";
 import { MediaPool, ASSET_MIME, AssetDragPayload } from "./MediaPool";
+import { UpdateNotification } from "./UpdateNotification";
 
 const FPS = 60;
 const WIDTH = 1920;
@@ -104,6 +105,7 @@ export const Editor: React.FC = () => {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100vh" }}>
+      <UpdateNotification />
       <div
         style={{
           display: "flex",

@@ -2,6 +2,7 @@ const { app, BrowserWindow, shell, dialog } = require("electron");
 const { spawn } = require("node:child_process");
 const http = require("node:http");
 const path = require("node:path");
+const { initAutoUpdater } = require("./auto-updater.cjs");
 
 const VITE_PORT = 5180;
 const VITE_URL = `http://localhost:${VITE_PORT}`;
@@ -192,6 +193,7 @@ const createWindow = async (url) => {
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
+      preload: path.join(__dirname, "preload.cjs"),
     },
   });
 
@@ -212,6 +214,10 @@ const createWindow = async (url) => {
 
   mainWindow.show();
   closeSplash();
+
+  if (app.isPackaged) {
+    initAutoUpdater(mainWindow);
+  }
 };
 
 app.whenReady().then(async () => {

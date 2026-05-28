@@ -2,7 +2,10 @@
   "name": "dabinky",
   "version": "1.0.0",
   "description": "My Remotion video",
-  "repository": {},
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yohjimane/dabinky.git"
+  },
   "license": "UNLICENSED",
   "private": true,
   "main": "electron/main.cjs",
@@ -12,6 +15,7 @@
     "@remotion/player": "4.0.441",
     "@remotion/tailwind-v4": "4.0.441",
     "@vitejs/plugin-react": "4.3.3",
+    "electron-updater": "^6.8.3",
     "fflate": "^0.8.2",
     "ffmpeg-static": "^5.3.0",
     "playwright": "^1.59.1",
@@ -83,14 +87,23 @@
     "directories": {
       "output": "dist"
     },
+    "publish": {
+      "provider": "github",
+      "owner": "yohjimane",
+      "repo": "dabinky"
+    },
     "mac": {
       "category": "public.app-category.video",
-      "target": {
-        "target": "dmg",
-        "arch": [
-          "arm64"
-        ]
-      },
+      "target": [
+        {
+          "target": "dmg",
+          "arch": ["arm64"]
+        },
+        {
+          "target": "zip",
+          "arch": ["arm64"]
+        }
+      ],
       "hardenedRuntime": false,
       "gatekeeperAssess": false,
       "identity": null
@@ -100,13 +113,15 @@
     },
     "win": {
       "target": {
-        "target": "portable",
+        "target": "nsis",
         "arch": ["x64"]
       },
       "icon": "build/icon.ico"
     },
-    "portable": {
-      "artifactName": "${productName}.${ext}"
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": false
     }
   }
 }

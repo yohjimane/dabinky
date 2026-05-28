@@ -2027,6 +2027,9 @@ function attachDabinkyMiddlewares(
               emit({ type: "stage", stage: "loading-page" });
               await page.goto(sourceUrl, { waitUntil: "networkidle" });
 
+              const cdp = await context.newCDPSession(page);
+              await cdp.send("Input.setIgnoreInputEvents", { ignore: true });
+
               for (let i = 0; i < 10; i++) {
                 await page.evaluate(() =>
                   (window as unknown as { __stepTime: () => void }).__stepTime(),

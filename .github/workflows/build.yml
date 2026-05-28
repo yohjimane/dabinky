@@ -15,11 +15,9 @@ jobs:
           - os: macos-14
             platform: mac
             script: dist:mac
-            artifact: "dist/*.dmg"
           - os: windows-latest
             platform: win
             script: dist:win
-            artifact: "dist/*.exe"
     runs-on: ${{ matrix.os }}
     env:
       CSC_IDENTITY_AUTO_DISCOVERY: "false"
@@ -35,7 +33,12 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: dabinky-${{ matrix.platform }}
-          path: ${{ matrix.artifact }}
+          path: |
+            dist/*.dmg
+            dist/*.zip
+            dist/*.exe
+            dist/*.yml
+            !dist/builder-*.yml
 
   release:
     needs: build

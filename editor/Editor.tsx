@@ -34,10 +34,17 @@ const newTrackId = (prefix: string) =>
 
 type EditorMode = "timeline" | "screen-demo";
 
+const defaultCaptureName = () => {
+  const d = new Date();
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `capture-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}.mp4`;
+};
+
 export const Editor: React.FC = () => {
   const [mode, setMode] = useState<EditorMode>("timeline");
   const [loaded, setLoaded] = useState<MyCompositionProps | null>(null);
   const [initStatus, setInitStatus] = useState("Loading composition…");
+  const [globalAssetKey, setGlobalAssetKey] = useState(0);
 
   useEffect(() => {
     (async () => {
@@ -120,15 +127,24 @@ export const Editor: React.FC = () => {
         </button>
       </div>
       <div style={{ flex: 1, minHeight: 0 }}>
-        {mode === "timeline" && loaded && <EditorInner initial={loaded} />}
-        {mode === "screen-demo" && <ScreenDemoEditor />}
+        {mode === "timeline" && loaded && (
+          <EditorInner
+            initial={loaded}
+            externalReloadKey={globalAssetKey}
+          />
+        )}
+        {mode === "screen-demo" && (
+          <ScreenDemoEditor
+            onCaptureComplete={() => setGlobalAssetKey((k) => k + 1)}
+          />
+        )}
       </div>
     </div>
   );
 };
 
 const DEFAULT_SCREEN_DEMO_PROPS: ScreenDemoProps = {
-  src: "captures/hero.mp4",
+  src: "",
   sourceUrl: "http://localhost:3001/?capture=true",
   background: "linear-gradient(135deg, #0f172a 0%, #1e293b 100%)",
   screenRadius: 12,
@@ -150,12 +166,128 @@ type CaptureState =
   | { kind: "done"; output: string; size: number }
   | { kind: "error"; message: string };
 
-const ScreenDemoEditor: React.FC = () => {
+type CaptureAsset = { name: string; size: number; mtime: number };
+
+const CaptureList: React.FC<{
+  selected: string;
+  onSelect: (src: string) => void;
+  refreshKey: number;
+}> = ({ selected, onSelect, refreshKey }) => {
+  const [assets, setAssets] = useState<CaptureAsset[]>([]);
+
+  useEffect(() => {
+    fetch("/api/assets")
+      .then((r) => r.json())
+      .then((json) => {
+        const captures = ((json.assets ?? []) as CaptureAsset[])
+          .filter((a) => a.name.startsWith("media/capture-"))
+          .sort((a, b) => b.mtime - a.mtime);
+        setAssets(captures);
+      })
+      .catch(() => {});
+  }, [refreshKey]);
+
+  if (assets.length === 0) {
+    return (
+      <div
+        style={{
+          color: "#555",
+          fontSize: 12,
+          textAlign: "center",
+          padding: 20,
+        }}
+      >
+        No captures yet.
+      </div>
+    );
+  }
+
+  return (
+    <>
+      {assets.map((a) => {
+        const active = a.name === selected;
+        return (
+          <div
+            key={a.name}
+            onClick={() => onSelect(a.name)}
+            style={{
+              background: active ? "#1e2a3a" : "#1a1a20",
+              border: `1px solid ${active ? "#3b6aa8" : "#26262e"}`,
+              borderRadius: 8,
+              padding: 8,
+              marginBottom: 8,
+              cursor: "pointer",
+            }}
+          >
+            <div
+              style={{
+                position: "relative",
+                width: "100%",
+                aspectRatio: "16 / 9",
+                background: "#000",
+                borderRadius: 5,
+                overflow: "hidden",
+                marginBottom: 6,
+              }}
+            >
+              <video
+                src={`/${a.name}`}
+                muted
+                preload="metadata"
+                onLoadedMetadata={(e) => {
+                  try {
+                    e.currentTarget.currentTime = Math.min(
+                      0.1,
+                      e.currentTarget.duration / 2,
+                    );
+                  } catch {}
+                }}
+                style={{
+                  width: "100%",
+                  height: "100%",
+                  objectFit: "cover",
+                  pointerEvents: "none",
+                }}
+              />
+            </div>
+            <div
+              style={{
+                fontSize: 11,
+                color: "#e8e8ea",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+              }}
+              title={a.name}
+            >
+              {a.name.split("/").pop()}
+            </div>
+            <div
+              style={{
+                fontSize: 10,
+                color: "#5a5a64",
+                marginTop: 2,
+              }}
+            >
+              {(a.size / 1024 / 1024).toFixed(1)} MB
+            </div>
+          </div>
+        );
+      })}
+    </>
+  );
+};
+
+const ScreenDemoEditor: React.FC<{
+  onCaptureComplete: () => void;
+}> = ({ onCaptureComplete }) => {
   const [props, setProps] = useState<ScreenDemoProps>(DEFAULT_SCREEN_DEMO_PROPS);
   const [durationSec, setDurationSec] = useState(12);
+  const [captureName, setCaptureName] = useState(defaultCaptureName());
   const [captureState, setCaptureState] = useState<CaptureState>({
     kind: "idle",
   });
+  const [captureRefreshKey, setCaptureRefreshKey] = useState(0);
   const playerRef = React.useRef<PlayerRef>(null);
 
   const durationInFrames = Math.max(1, Math.ceil(durationSec * FPS));
@@ -210,7 +342,7 @@ const ScreenDemoEditor: React.FC = () => {
           duration: durationSec,
           width: WIDTH,
           height: HEIGHT,
-          output: props.src,
+          output: captureName,
         }),
       });
       if (!res.body) throw new Error("no response body");
@@ -241,11 +373,15 @@ const ScreenDemoEditor: React.FC = () => {
                 progress: ev.progress ?? 0,
               });
             } else if (ev.type === "done") {
+              setProps((prev) => ({ ...prev, src: ev.output }));
               setCaptureState({
                 kind: "done",
                 output: ev.output,
                 size: ev.size,
               });
+              setCaptureRefreshKey((k) => k + 1);
+              onCaptureComplete();
+              setCaptureName(defaultCaptureName());
             } else if (ev.type === "error") {
               setCaptureState({ kind: "error", message: ev.message });
             }
@@ -283,11 +419,38 @@ const ScreenDemoEditor: React.FC = () => {
     <div
       style={{
         display: "grid",
-        gridTemplateColumns: "1fr 380px",
+        gridTemplateColumns: "220px 1fr 380px",
         height: "100%",
         minHeight: 0,
       }}
     >
+      <div
+        style={{
+          display: "flex",
+          flexDirection: "column",
+          height: "100%",
+          background: "#101014",
+          borderRight: "1px solid #1e1e24",
+        }}
+      >
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            padding: "10px 12px",
+            borderBottom: "1px solid #1e1e24",
+          }}
+        >
+          <strong style={{ fontSize: 13 }}>Captures</strong>
+        </div>
+        <div style={{ overflowY: "auto", padding: 10, flex: 1 }}>
+          <CaptureList
+            selected={props.src}
+            onSelect={(src) => setProps((p) => ({ ...p, src }))}
+            refreshKey={captureRefreshKey}
+          />
+        </div>
+      </div>
       <div
         style={{
           display: "flex",
@@ -303,11 +466,12 @@ const ScreenDemoEditor: React.FC = () => {
             gap: 8,
             padding: "10px 16px",
             borderBottom: "1px solid #1e1e24",
+            flexWrap: "wrap",
           }}
         >
           <strong style={{ marginRight: "auto" }}>Screen Demo</strong>
           <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-            <label style={{ color: "#8b8b94", fontSize: 12 }}>Source URL</label>
+            <label style={{ color: "#8b8b94", fontSize: 12 }}>URL</label>
             <input
               value={props.sourceUrl}
               onChange={(e) =>
@@ -320,7 +484,7 @@ const ScreenDemoEditor: React.FC = () => {
                 color: "#e8e8ea",
                 padding: "6px 10px",
                 fontSize: 12,
-                width: 280,
+                width: 220,
               }}
             />
           </div>
@@ -345,6 +509,23 @@ const ScreenDemoEditor: React.FC = () => {
               }}
             />
             <span style={{ color: "#70707a", fontSize: 11 }}>s</span>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <label style={{ color: "#8b8b94", fontSize: 12 }}>Name</label>
+            <input
+              value={captureName}
+              onChange={(e) => setCaptureName(e.target.value)}
+              style={{
+                background: "#0c0c10",
+                border: "1px solid #2e2e34",
+                borderRadius: 6,
+                color: "#e8e8ea",
+                padding: "6px 10px",
+                fontSize: 12,
+                width: 180,
+              }}
+              placeholder="capture-..."
+            />
           </div>
           <button
             onClick={startCapture}
@@ -555,9 +736,10 @@ const ScreenDemoEditor: React.FC = () => {
   );
 };
 
-const EditorInner: React.FC<{ initial: MyCompositionProps }> = ({
-  initial,
-}) => {
+const EditorInner: React.FC<{
+  initial: MyCompositionProps;
+  externalReloadKey: number;
+}> = ({ initial, externalReloadKey }) => {
   const { state, set, reset, undo, redo, canUndo, canRedo } =
     useHistory<MyCompositionProps>(initial);
   const [savedSnapshot, setSavedSnapshot] =
@@ -1193,7 +1375,7 @@ const EditorInner: React.FC<{ initial: MyCompositionProps }> = ({
         <MediaPool
           usedSources={usedSources}
           onAdd={addClipFromAsset}
-          reloadKey={assetRefreshKey}
+          reloadKey={assetRefreshKey + externalReloadKey}
         />
       </div>
       <div

@@ -1970,21 +1970,27 @@ function attachDabinkyMiddlewares(
               const duration = Math.max(0.1, Number(parsed.duration ?? 12));
               const width = Math.max(1, Number(parsed.width ?? 1920));
               const height = Math.max(1, Number(parsed.height ?? 1080));
-              const outputRel = String(
-                parsed.output || "captures/hero.mp4",
+              const defaultName = (() => {
+                const d = new Date();
+                const pad = (n: number) => String(n).padStart(2, "0");
+                return `capture-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}.mp4`;
+              })();
+              const outputName = String(parsed.output || defaultName).replace(
+                /^media\//,
+                "",
               );
-              const outputAbs = path.join(publicDir, outputRel);
+              ensureMediaDir();
+              const outputAbs = path.join(mediaDir, path.basename(outputName));
 
               const totalFrames = Math.ceil(captureFps * duration);
               const frameMs = 1000 / captureFps;
 
               fs.mkdirSync(frameDir, { recursive: true });
-              fs.mkdirSync(path.dirname(outputAbs), { recursive: true });
 
               emit({ type: "stage", stage: "launching-browser" });
 
               const playwright = await import("playwright");
-              browser = await playwright.chromium.launch({ headless: true });
+              browser = await playwright.chromium.launch({ headless: false });
               const context = await browser.newContext({
                 viewport: { width, height },
                 deviceScaleFactor: 1,
@@ -2111,7 +2117,7 @@ function attachDabinkyMiddlewares(
               const stat = fs.statSync(outputAbs);
               emit({
                 type: "done",
-                output: outputRel,
+                output: `media/${path.basename(outputAbs)}`,
                 size: stat.size,
                 totalFrames,
               });

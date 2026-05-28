@@ -2,7 +2,6 @@ import { Video } from "@remotion/media";
 import {
   AbsoluteFill,
   Easing,
-  getRemotionEnvironment,
   interpolate,
   staticFile,
   useCurrentFrame,
@@ -20,9 +19,7 @@ const KeyframeSchema = z.object({
 
 export const ScreenDemoSchema = z.object({
   src: z.string().describe("Captured video path relative to /public"),
-  sourceUrl: z
-    .string()
-    .describe("Live page URL for preview iframe and auto-capture"),
+  sourceUrl: z.string().describe("Live page URL for auto-capture"),
   background: z
     .string()
     .default("linear-gradient(135deg, #0f172a, #1e293b)"),
@@ -49,22 +46,18 @@ const interpolateKeyframes = (
 
 export const ScreenDemo: React.FC<ScreenDemoProps> = ({
   src,
-  sourceUrl,
   background,
   screenRadius,
   screenShadow,
   keyframes,
 }) => {
   const frame = useCurrentFrame();
-  const env = getRemotionEnvironment();
 
   const scale = interpolateKeyframes(frame, keyframes, "scale");
   const x = interpolateKeyframes(frame, keyframes, "x");
   const y = interpolateKeyframes(frame, keyframes, "y");
   const rotateY = interpolateKeyframes(frame, keyframes, "rotateY");
   const rotateX = interpolateKeyframes(frame, keyframes, "rotateX");
-
-  const isPreview = !env.isRendering;
 
   return (
     <AbsoluteFill style={{ background }}>
@@ -84,16 +77,7 @@ export const ScreenDemo: React.FC<ScreenDemoProps> = ({
             height: 1080,
           }}
         >
-          {isPreview ? (
-            <iframe
-              src={sourceUrl}
-              style={{
-                width: "100%",
-                height: "100%",
-                border: "none",
-              }}
-            />
-          ) : (
+          {src ? (
             <Video
               src={
                 src.startsWith("http://") || src.startsWith("https://")
@@ -103,6 +87,22 @@ export const ScreenDemo: React.FC<ScreenDemoProps> = ({
               style={{ width: "100%", height: "100%" }}
               muted
             />
+          ) : (
+            <div
+              style={{
+                width: "100%",
+                height: "100%",
+                background: "linear-gradient(135deg, #1e293b, #0f172a)",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                color: "#475569",
+                fontSize: 18,
+                fontFamily: "system-ui, sans-serif",
+              }}
+            >
+              Capture a page to preview
+            </div>
           )}
         </div>
       </AbsoluteFill>

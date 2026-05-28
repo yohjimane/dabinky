@@ -80,7 +80,7 @@ async function main() {
     if (existsSync(FRAME_DIR)) rmSync(FRAME_DIR, { recursive: true });
     mkdirSync(FRAME_DIR, { recursive: true });
 
-    const browser = await chromium.launch({ headless: true });
+    const browser = await chromium.launch({ headless: false });
     const context = await browser.newContext({
         viewport: { width: WIDTH, height: HEIGHT },
         deviceScaleFactor: 1,
